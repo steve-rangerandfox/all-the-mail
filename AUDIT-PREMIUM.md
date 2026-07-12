@@ -23,9 +23,10 @@ keyboard layer, search operators. Most $15/mo competitors don't have this discip
 
 But three things sit between this and 1,000 paying users, one per lens:
 
-1. **Experience:** the inbox is fast to _first paint_ but not Gmail-fast to _scroll and search_, and the
-   headline multi-account promise (unified cross-account search) isn't built. **P0-A** below is also an
-   experience-killer: scheduled send silently fails when the tab closes.
+1. **Experience:** the headline multi-account promise (unified cross-account search) _is_ built
+   (client-side fan-out) — but the inbox is fast to _first paint_ and not yet Gmail-fast to _scroll and
+   page_ (no virtualization, no pagination past 100). **P0-A** below is the real experience-killer:
+   scheduled send silently fails when the tab closes.
 2. **Security:** the hardening is real but leaks trust at the edges — account removal doesn't revoke
    Google access, login has no CSRF `state`, and every sender domain is broadcast to Clearbit.
 3. **Design:** the "one cohesive premium surface" story is contradicted in the code — the **banned
@@ -33,6 +34,24 @@ But three things sit between this and 1,000 paying users, one per lens:
    brand doc says paper/ink/red; the app still paints lilac gradients.
 
 Fix those and the product earns the price. The rest is polish.
+
+---
+
+## Implementation status (local commits this session, pending push)
+
+The GitHub App on the repo is currently read-only, so these are committed on
+`claude/all-the-mail-audit-fghne7` locally and delivered as patches — not yet pushed/deployed.
+
+| Phase | Item | Status |
+|---|---|---|
+| 1 | Revoke Google grant + fix client-cache invalidation on account removal (**P1-A security**, Google-review gate) | ✅ committed + tests pass |
+| 3 | Purge banned violet AI-accent → brand red across `design-system.css` + `App.js` (**design cohesion**) | ✅ committed + build passes |
+| 4 | Drop Clearbit correspondence leak + block remote email images by default with a "Show images" opt-in (**P1-C/P1-D privacy**) | ✅ committed + 64 tests + build pass |
+| — | Corrected: unified cross-account search **already exists** (client-side); downgraded from P0 to P2 | ✅ audit updated |
+
+Not yet done (higher risk to ship without live verification, or larger scope): **P0-A** server-side
+send/snooze worker, **P1-B** login CSRF `state` (auth-path change — needs a live OAuth smoke test),
+list virtualization + pagination, `users.watch` push, UTC calendar formatting.
 
 ---
 
@@ -51,13 +70,16 @@ list — it breaks a feature the pricing page implies and email users trust unco
 **Fix:** a backend job (Supabase `pg_cron` + Edge Function, or a Render worker) that claims `pending`
 rows via the existing CAS lock and sends server-side. Un-snooze likewise.
 
-### P0-B · No unified cross-account search — the headline feature is missing
-Search is per-account (`emails.js:311` passes `q` to one account's Gmail API). The entire reason a
-5-Gmail user pays you instead of using tabs is **one search box across all inboxes**. Right now they
-still have to pick an account first, which is the exact pain the product claims to remove. This is the
-feature that converts the demo into a subscription. **Fix:** a `/emails/search-all` route that fans out
-`messages.list` across every `mail`-scoped account (concurrency-limited), merges by date, tags each
-result with its source chip. The frontend already renders source chips everywhere.
+### P2-B · Unified cross-account search exists, but is client-side and shallow  _(corrected)_
+**Correction to an earlier draft: unified cross-account search IS built.** `searchAllAccounts`
+(`useEmail.js:470`) fans out the query to every connected account's Gmail search, merges, dedupes, and
+sorts by date — the headline "one search box across all inboxes" already works. It is not a missing
+feature and should not block the roadmap. What remains is quality, not existence:
+- It's a **client-side fan-out** (N parallel browser requests), **capped at 25 results/account**, with
+  no server-side merge, relevance ranking, or pagination. Fine at 2–4 accounts; gets slow and shallow at
+  8+. A `/emails/search-all` backend route (concurrency-limited fan-out, server-side merge + paging)
+  would make it fast and deep — a **P2 optimization**, not a P0.
+- Consider surfacing recent-searches / saved-searches directly in the unified box (the infra exists).
 
 ### P1-A · Inbox scroll and search aren't Gmail-fast past the first screen
 - **No list virtualization** (confirmed: no `react-window`/virtuoso). `MailModule.js:215` maps the full
@@ -282,8 +304,9 @@ protected by retention.** The critical path is (0) clear the scale gate, (1) pro
    always.
 1. **P0-A** server-side scheduled-send/snooze/undo worker — a paid feature is currently broken, and
    retention/trust is what keeps LTV:CAC above 3 so acquisition stays affordable.
-2. **P0-B** unified cross-account search — the single feature that converts demo → subscription and the
-   #1 driver of `activation` and `trial→paid` in the model.
+2. **Unified cross-account search is already shipped** (client-side) — the demo→subscription hook
+   exists. Harden it to a server-side `/emails/search-all` (paging + ranking) only as a **P2**
+   optimization; do not treat it as a launch blocker.
 3. **Fund distribution** — ~$1.5–3K/mo disciplined ads (LTV:CAC ≈ 3.4 supports it) on top of a
    compounding SEO investment targeting the "manage multiple Gmail accounts" cluster. This is the
    dominant lever (r=+0.56 ad budget, +0.45 SEO); the base case fails for lack of it, not lack of product.
