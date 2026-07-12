@@ -95,8 +95,40 @@ function decryptToken(encrypted) {
 const _clientCache = new Map(); // accountId → { client, expiresAt }
 const CLIENT_CACHE_TTL_MS = 50 * 60 * 1000;
 
-function invalidateClientCache(accountId) {
-  _clientCache.delete(accountId);
+// Drop the cached OAuth2 client for an account. Cache keys are
+// `${accountId}:${userId}` (see getOAuth2ClientForAccount), so deleting a
+// bare accountId — as this previously did — never matched and the cache
+// leaked a live client for up to CLIENT_CACHE_TTL_MS after removal. When
+// userId is known we delete the exact key; otherwise we sweep every entry
+// for that account (belt-and-suspenders for callers without a userId).
+function invalidateClientCache(accountId, userId) {
+  if (userId) {
+    _clientCache.delete(`${accountId}:${userId}`);
+    return;
+  }
+  const prefix = `${accountId}:`;
+  for (const key of _clientCache.keys()) {
+    if (key.startsWith(prefix)) _clientCache.delete(key);
+  }
+}
+
+// Revoke a Google OAuth grant at Google's revocation endpoint. Removing an
+// account must actually sever our access, not just delete the local row —
+// otherwise we keep a live refresh token after the user believes access is
+// gone (a privacy-page contradiction and a Google CASA-review blocker).
+// Revoking the refresh_token invalidates the entire grant. Best-effort by
+// design: a failure here must never block account deletion, so callers
+// should not await-throw on it.
+async function revokeGoogleGrant(tokens) {
+  const token = tokens?.refresh_token || tokens?.access_token;
+  if (!token) return { revoked: false, reason: 'no_token' };
+  try {
+    const client = newOAuth2Client();
+    await client.revokeToken(token);
+    return { revoked: true };
+  } catch (err) {
+    return { revoked: false, reason: err?.message || 'revoke_failed' };
+  }
 }
 
 // P1.8 — userId is REQUIRED. Every caller must pass it; the function refuses
@@ -221,6 +253,7 @@ export {
   decryptToken,
   getOAuth2ClientForAccount,
   invalidateClientCache,
+  revokeGoogleGrant,
   buildUpgradeAuthUrl,
   accountHasGroup,
 };

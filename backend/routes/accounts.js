@@ -1,9 +1,10 @@
 import { Router } from 'express';
 import { google } from 'googleapis';
 import supabase from '../lib/supabase.js';
-import { oauth2Client, ALL_SCOPES, getOAuth2ClientForAccount, buildUpgradeAuthUrl, SERVICE_SCOPES } from '../lib/google.js';
+import { oauth2Client, ALL_SCOPES, getOAuth2ClientForAccount, buildUpgradeAuthUrl, SERVICE_SCOPES, decryptToken, invalidateClientCache, revokeGoogleGrant } from '../lib/google.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { issueOAuthState } from '../lib/security.js';
+import { safeLogError } from '../lib/log.js';
 
 const router = Router();
 
@@ -93,9 +94,10 @@ router.delete('/:accountId', authenticateToken, async (req, res) => {
   try {
     const { accountId } = req.params;
 
+    // Select the encrypted tokens too so we can revoke the Google grant.
     const { data: account } = await supabase
       .from('gmail_accounts')
-      .select('id')
+      .select('id, encrypted_tokens')
       .eq('id', accountId)
       .eq('user_id', req.userId)
       .single();
@@ -112,6 +114,21 @@ router.delete('/:accountId', authenticateToken, async (req, res) => {
     if (count <= 1) {
       return res.status(400).json({ error: 'Cannot remove your only account' });
     }
+
+    // Sever access at Google BEFORE deleting the row. Best-effort: a revoke
+    // failure (network blip, already-revoked token) must not block removal —
+    // we log it and continue so the user's delete always succeeds. Also drop
+    // the cached OAuth2 client so a stale client can't be reused post-delete.
+    try {
+      const tokens = decryptToken(account.encrypted_tokens);
+      const result = await revokeGoogleGrant(tokens);
+      if (!result.revoked) {
+        safeLogError('accounts delete revoke', new Error(result.reason || 'revoke_failed'), { accountId });
+      }
+    } catch (revokeErr) {
+      safeLogError('accounts delete revoke', revokeErr, { accountId });
+    }
+    invalidateClientCache(accountId, req.userId);
 
     const { error } = await supabase
       .from('gmail_accounts')
