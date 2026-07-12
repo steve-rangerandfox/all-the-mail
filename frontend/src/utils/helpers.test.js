@@ -12,6 +12,8 @@ import {
   hexToRgb,
   getAccountGradient,
   buildEmailSrcDoc,
+  emailHtmlHasRemoteImages,
+  getSenderLogoUrl,
   sanitizeDocHtml,
 } from './helpers';
 import { FileText, Table2, Presentation } from 'lucide-react';
@@ -255,6 +257,44 @@ describe('buildEmailSrcDoc', () => {
   it('provides fallback for empty/null HTML', () => {
     const result = buildEmailSrcDoc(null);
     expect(result).toContain('(empty)');
+  });
+  it('blocks remote images by default via CSP (no remote img-src)', () => {
+    try { localStorage.removeItem('atm_load_remote_images'); } catch {}
+    const result = buildEmailSrcDoc('<img src="https://tracker.example/pixel.gif">');
+    expect(result).toContain('Content-Security-Policy');
+    expect(result).toContain("img-src data: cid:");
+    expect(result).not.toContain('img-src https:');
+  });
+  it('allows remote images when explicitly opted in', () => {
+    const result = buildEmailSrcDoc('<img src="https://cdn.example/logo.png">', { loadRemoteImages: true });
+    expect(result).toContain('img-src https: http: data: cid:');
+  });
+  it('respects the global localStorage opt-in preference', () => {
+    try { localStorage.setItem('atm_load_remote_images', 'true'); } catch {}
+    const result = buildEmailSrcDoc('<img src="https://cdn.example/logo.png">');
+    expect(result).toContain('img-src https: http: data: cid:');
+    try { localStorage.removeItem('atm_load_remote_images'); } catch {}
+  });
+});
+
+// ---------- emailHtmlHasRemoteImages ----------
+describe('emailHtmlHasRemoteImages', () => {
+  it('detects remote http/https images', () => {
+    expect(emailHtmlHasRemoteImages('<img src="https://x.com/a.png">')).toBe(true);
+    expect(emailHtmlHasRemoteImages('<img src="http://x.com/a.png">')).toBe(true);
+  });
+  it('ignores inline data: images and empty input', () => {
+    expect(emailHtmlHasRemoteImages('<img src="data:image/png;base64,AAAA">')).toBe(false);
+    expect(emailHtmlHasRemoteImages('')).toBe(false);
+    expect(emailHtmlHasRemoteImages(null)).toBe(false);
+  });
+});
+
+// ---------- getSenderLogoUrl (Clearbit leak removed) ----------
+describe('getSenderLogoUrl', () => {
+  it('never returns a third-party URL (privacy: Clearbit removed)', () => {
+    expect(getSenderLogoUrl('Acme <hi@acme.com>')).toBeNull();
+    expect(getSenderLogoUrl('someone@gmail.com')).toBeNull();
   });
 });
 

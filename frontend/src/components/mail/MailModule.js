@@ -9,11 +9,12 @@ import { Panel, Separator as PanelResizeHandle, Group as PanelGroup } from 'reac
 import Avatar from '../Avatar';
 import Sidebar from '../common/Sidebar';
 import { API_BASE } from '../../utils/constants';
-import { getAccountGradient, buildEmailSrcDoc, stripName, getEmailOnly, formatTime } from '../../utils/helpers';
+import { getAccountGradient, buildEmailSrcDoc, emailHtmlHasRemoteImages, stripName, getEmailOnly, formatTime } from '../../utils/helpers';
 
 const MailModule = ({
   // Split/layout
   splitMode,
+  loadRemoteImages, onShowImages,
   fullPageReaderOpen, setFullPageReaderOpen,
   // Email hook outputs
   emails, setEmails,
@@ -536,7 +537,7 @@ const MailModule = ({
                           <>
                             <iframe
                               title={`Thread message ${m.id}`}
-                              srcDoc={buildEmailSrcDoc(msgBody)}
+                              srcDoc={buildEmailSrcDoc(msgBody, { loadRemoteImages })}
                               sandbox="allow-same-origin allow-popups"
                               scrolling="no"
                               style={{ width: '100%', border: 'none', display: 'block', background: 'var(--email-bg)' }}
@@ -568,9 +569,16 @@ const MailModule = ({
                 }
               </div>
             ) : (
+              <>
+              {emailHtmlHasRemoteImages(emailBodies[email.id]) && !loadRemoteImages && (
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', padding: '8px 12px', background: 'var(--bg-3)', borderBottom: '1px solid var(--line-0)', fontSize: '12px', color: 'var(--text-2)' }}>
+                  <span>Remote images are hidden to protect your privacy.</span>
+                  {onShowImages && <button className="btn-ghost" style={{ fontSize: '12px', padding: '4px 10px', flexShrink: 0 }} onClick={onShowImages}>Show images</button>}
+                </div>
+              )}
               <iframe title="Email content" ref={iframeRef}
                 sandbox="allow-same-origin allow-popups"
-                srcDoc={buildEmailSrcDoc(emailBodies[email.id] || '<div style="padding:16px;">(no content)</div>')}
+                srcDoc={buildEmailSrcDoc(emailBodies[email.id] || '<div style="padding:16px;">(no content)</div>', { loadRemoteImages })}
                 scrolling="no"
                 onLoad={() => {
                   if (iframeResizeCleanupRef.current) iframeResizeCleanupRef.current();
@@ -585,6 +593,7 @@ const MailModule = ({
                   iframeResizeCleanupRef.current = () => { timers.forEach(clearTimeout); imgs.forEach(i => { try { i.removeEventListener('load', resize); } catch(e) {} }); if (ro) ro.disconnect(); };
                 }}
                 style={{ width: '100%', border: '0', display: 'block', background: 'var(--email-bg)', borderRadius: '8px', overflow: 'hidden' }} />
+              </>
             )}
           </div>
           {emailAttachments[email.id]?.length > 0 && (

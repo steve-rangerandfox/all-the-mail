@@ -56,30 +56,22 @@ export function getSenderInitial(name) {
   return (clean[0] || '?').toUpperCase();
 }
 
-// Domains that are personal email providers — don't try to load a logo
-const PERSONAL_DOMAINS = new Set([
-  'gmail.com', 'googlemail.com', 'yahoo.com', 'yahoo.co.uk', 'ymail.com',
-  'outlook.com', 'hotmail.com', 'live.com', 'msn.com', 'aol.com',
-  'icloud.com', 'me.com', 'mac.com', 'protonmail.com', 'proton.me',
-  'zoho.com', 'mail.com', 'gmx.com', 'gmx.net', 'fastmail.com',
-  'tutanota.com', 'hey.com', 'pm.me', 'yandex.com', 'yandex.ru',
-]);
-
-// Failed domain cache — avoid retrying domains with no logo
-const _failedLogoDomains = new Set();
-
-export function getSenderLogoUrl(fromHeader) {
-  const email = getEmailOnly(fromHeader || '').toLowerCase();
-  const domain = email.split('@')[1];
-  if (!domain || PERSONAL_DOMAINS.has(domain) || _failedLogoDomains.has(domain)) return null;
-  return `https://logo.clearbit.com/${domain}`;
+// Sender logos are intentionally disabled.
+//
+// The previous implementation requested https://logo.clearbit.com/<domain>
+// for every non-personal sender, which silently broadcast the domain of
+// everyone the user corresponds with to a third party (Clearbit) on every
+// inbox render — a correspondence-graph leak that directly undercuts the
+// product's account-separation privacy pitch. We return null so SenderAvatar
+// falls back to its deterministic colored-initial avatar (no network call,
+// no leak). If we want brand logos back, proxy + cache them server-side so
+// the request comes from our backend, never the user's browser.
+export function getSenderLogoUrl() {
+  return null;
 }
 
-export function markLogoFailed(fromHeader) {
-  const email = getEmailOnly(fromHeader || '').toLowerCase();
-  const domain = email.split('@')[1];
-  if (domain) _failedLogoDomains.add(domain);
-}
+// Kept as a no-op so existing callers (SenderAvatar onError) don't break.
+export function markLogoFailed() {}
 
 export function hexToRgb(hex) {
   const h = hex.replace('#', '');
@@ -100,7 +92,25 @@ export function getAccountGradient(accountIndex) {
   };
 }
 
-export function buildEmailSrcDoc(rawHtml) {
+// True if the raw email HTML references at least one remote (http/https)
+// image. Used by the reader UI to decide whether to surface a "Show images"
+// affordance. Inline data: images don't count — they load no matter what.
+export function emailHtmlHasRemoteImages(rawHtml) {
+  if (!rawHtml) return false;
+  return /<img\b[^>]*\bsrc\s*=\s*["']?\s*https?:/i.test(String(rawHtml));
+}
+
+// Whether remote images should be allowed to load. Privacy-by-default: OFF
+// unless the caller explicitly opts in, or the user has flipped the global
+// "load remote images" preference. Blocking is what stops tracking pixels
+// from leaking opens + IP/location to senders on every render.
+function remoteImagesAllowed(explicit) {
+  if (typeof explicit === 'boolean') return explicit;
+  try { return localStorage.getItem('atm_load_remote_images') === 'true'; }
+  catch { return false; }
+}
+
+export function buildEmailSrcDoc(rawHtml, opts = {}) {
   ensureDOMPurifyHooks();
   const html = rawHtml || '<div style="padding:16px;color:#111;">(empty)</div>';
   const clean = DOMPurify.sanitize(html, {
@@ -115,7 +125,16 @@ export function buildEmailSrcDoc(rawHtml) {
       'target','rel'],
     ALLOW_DATA_ATTR: false,
   });
-  return `<!doctype html><html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><style>html,body{margin:0;padding:24px;background:#F5F7FA;color:#111;font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;font-size:14px;line-height:1.5}img{max-width:100%;height:auto}table{max-width:100%!important}a{color:#0b57d0}body{overflow:hidden}</style></head><body>${clean}</body></html>`;
+  // Second, authoritative layer of image control: a CSP inside the iframe.
+  // DOMPurify keeps <img src>, but this CSP decides whether the browser is
+  // even allowed to FETCH remote images. Default blocks everything except
+  // inline data:/cid: — so tracking pixels never phone home. When the user
+  // opts in, we widen img-src to allow remote hosts. Scripts are already
+  // blocked by the sandbox (no allow-scripts) and by default-src 'none'.
+  const allowRemote = remoteImagesAllowed(opts.loadRemoteImages);
+  const imgSrc = allowRemote ? 'https: http: data: cid:' : 'data: cid:';
+  const csp = `default-src 'none'; img-src ${imgSrc}; style-src 'unsafe-inline'`;
+  return `<!doctype html><html><head><meta charset="utf-8"/><meta http-equiv="Content-Security-Policy" content="${csp}"/><meta name="viewport" content="width=device-width,initial-scale=1"/><style>html,body{margin:0;padding:24px;background:#F5F7FA;color:#111;font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;font-size:14px;line-height:1.5}img{max-width:100%;height:auto}table{max-width:100%!important}a{color:#0b57d0}body{overflow:hidden}</style></head><body>${clean}</body></html>`;
 }
 
 // All-day calendar events come down as { startISO: "YYYY-MM-DD", allDay: true }.

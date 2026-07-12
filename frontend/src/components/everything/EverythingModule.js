@@ -1,7 +1,7 @@
 import React from 'react';
 import { Mail, FileText, Calendar, Plus, X, ArrowLeft, Reply, Forward, Users, Archive } from 'lucide-react';
 import { Group as PanelGroup, Panel, Separator as PanelResizeHandle } from 'react-resizable-panels';
-import { getAccountGradient, getDocIcon, formatRelativeEdit, formatTime, stripName, buildEmailSrcDoc } from '../../utils/helpers';
+import { getAccountGradient, getDocIcon, formatRelativeEdit, formatTime, stripName, buildEmailSrcDoc, emailHtmlHasRemoteImages } from '../../utils/helpers';
 
 const EverythingModule = ({
   evFilteredEmails, evFilteredDocs, evFilteredEvents, filteredAllEvents,
@@ -12,6 +12,7 @@ const EverythingModule = ({
   mobileUnifiedFeed,
   connectedAccounts,
   activeView,
+  loadRemoteImages, onShowImages,
   slideOverEmail, openSlideOverEmail, closeSlideOver,
   slideOverDoc, openSlideOverDoc,
   isLoadingDocs, isLoadingEvents,
@@ -104,6 +105,7 @@ const EverythingModule = ({
                 setEmails={setEmails}
                 setError={setError}
                 apiBase={apiBase}
+                loadRemoteImages={loadRemoteImages} onShowImages={onShowImages}
               />
             </Panel>
           </>
@@ -280,6 +282,7 @@ const EverythingEmailReader = ({
   setEmails,
   setError,
   apiBase,
+  loadRemoteImages, onShowImages,
 }) => {
   if (!email) return null;
   const eid = email.id;
@@ -358,9 +361,15 @@ const EverythingEmailReader = ({
             </div>
           ) : (
             <div className="email-body-wrapper" style={{ overflow: 'hidden' }}>
+              {emailHtmlHasRemoteImages(body) && !loadRemoteImages && (
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', padding: '8px 12px', background: 'var(--bg-3)', borderBottom: '1px solid var(--line-0)', fontSize: '12px', color: 'var(--text-2)' }}>
+                  <span>Remote images are hidden to protect your privacy.</span>
+                  {onShowImages && <button className="btn-ghost" style={{ fontSize: '12px', padding: '4px 10px', flexShrink: 0 }} onClick={onShowImages}>Show images</button>}
+                </div>
+              )}
               <iframe
                 title="Email preview"
-                srcDoc={buildEmailSrcDoc(body)}
+                srcDoc={buildEmailSrcDoc(body, { loadRemoteImages })}
                 scrolling="no"
                 sandbox="allow-same-origin allow-popups"
                 style={{ width: '100%', border: 'none', display: 'block', background: 'var(--email-bg)', minHeight: 120 }}
