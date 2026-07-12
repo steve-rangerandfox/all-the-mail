@@ -181,22 +181,121 @@ view, which is exactly what earns a premium price. The work here is enforcement,
 
 ---
 
+## Lens 4 — Commercial feasibility (Monte Carlo, 1,000 runs)
+
+Grounded in your own market analysis (CAC, conversion, churn, channel assumptions) and the **actual
+shipped model** — single $15/mo tier, 14-day trial, card-upfront, no free tier. Each run samples 12
+uncertain inputs (acquisition by channel, activation, trial→paid, churn, ad economics, referral) and
+simulates 18 monthly cohorts. Distributions are triangular around your documented anchors. Full model
+and outputs are in the scratchpad script; headline results below.
+
+### The uncomfortable base case
+Under the **current mostly-organic plan** (modest ads, SEO ramp, one launch spike):
+
+| Metric | P10 | P50 | P90 |
+|---|---|---|---|
+| Paying users @ month 12 | 256 | 420 | 660 |
+| Paying users @ month 18 | 351 | 599 | 972 |
+| MRR @ month 18 | $5.3K | $9.0K | $14.6K |
+
+- **P(≥1,000 payers by month 18): ~9%.** P(by month 12): ~1%.
+- P(≥500 by month 18): ~67%. P(≥2,000): ~0%.
+
+**Read:** the 1,000-user goal is _not_ on track under status quo. But the reason is specific and fixable
+— and it is **not** product quality.
+
+### The binding constraint is distribution, not the product
+Scenario analysis (same product, different go-to-market), P(≥1,000 payers by M18):
+
+| Scenario | P(1k @ M18) | Median payers @ M18 |
+|---|---|---|
+| A. Base — current organic plan | ~10% | 600 |
+| B. **Product fixes only** (unified search, mobile PWA, server-side send → higher activation/retention) | ~39% | 900 |
+| C. **Marketing push only** (sustained ads + SEO investment + bigger launch) | ~97% | 1,900 |
+| D. **Both** (ship P0/P1 product + fund distribution) | ~100% | 2,885 |
+| E. Lean focused (mid ads + product fixes) | ~96% | 1,700 |
+
+Marketing is the dominant lever because the funnel is **top-of-funnel-starved, not conversion-starved** —
+the product already converts at ~40% trial→paid (card-upfront). Product fixes alone roughly quadruple
+the odds (10%→39%) but can't clear the goal without distribution. Distribution alone clears it. Doing
+both is the only path to the _real_ business (2,000+ payers, ~$43K MRR).
+
+### The unit economics support paying to acquire
+- Blended **LTV ≈ $200/payer** (at ~5.5% median monthly churn, 80% gross margin).
+- Blended **CAC via ads ≈ $62** (card-upfront filters casual signups, so paid trials are expensive).
+- **LTV:CAC median ≈ 3.4**; ~60% of ad-spending runs clear the healthy ≥3 bar.
+- **Budget sweep** (product fixed at "fixes shipped"): even **~$1,500/mo** sustained ads → **82%**
+  P(1k @ M18); ~$3,000/mo → ~98%. This is a fundable, rational spend given the economics.
+
+### The card-upfront decision was correct (validation, not a change)
+For the goal of 1,000 _paying_ users at fixed marketing reach:
+
+| Acquisition model | P(1k payers @ M18) |
+|---|---|
+| **Card-upfront trial (shipped)** | **~65%** |
+| No-card 14-day trial | ~38% |
+| Freemium (2-account free tier) | ~9% |
+
+Freemium optimizes _free_ users — to net 1,000 payers you'd need ~18–33K free accounts and a viral/content
+engine you don't have yet. Card-upfront's conversion edge beats freemium's volume edge when the target is
+payers. **Keep the model.** (The older market doc's $9 freemium recommendation predates this; the
+simulation favors the $15 card-upfront tier you actually shipped.)
+
+### What moves the outcome most (sensitivity, Spearman corr with payers @ M18)
+```
+Ad budget/mo              +0.56  ← dominant lever
+SEO base volume           +0.45  ← compounding, cheapest long-run CAC
+Effective trial->paid     +0.34  ← product: activation × conversion
+Cost per trial (ads)      -0.34  ← creative/targeting efficiency
+Monthly churn             -0.29  ← product: retention protects LTV & ad ROI
+Activation (2nd account)  +0.24  ← the "magic moment" — instrument & optimize it
+```
+Note the interlock: **churn and activation are product levers that directly gate whether paid
+acquisition is affordable.** If churn runs >7%, LTV:CAC compresses below 3 and the ad engine stops
+paying for itself. So the P0/P1 retention fixes (server-side send, mobile, unified search) aren't just
+UX — they are the precondition that makes the marketing spend rational. Product and distribution are
+one system, not two budgets.
+
+### Hard gate before any of this scales
+Every scenario above assumes you can serve >100 users. Today the Google OAuth project is under the
+**100-user unverified cap**, and the security finding **"account removal doesn't revoke the Google
+grant"** is a likely CASA-review blocker. **Passing Google verification is a prerequisite to _all_
+growth scenarios** — it belongs at the very front of the plan, ahead of marketing spend.
+
+### Feasibility verdict
+A premium product at 1,000 paying users is **feasible but not the default outcome.** Status quo is ~9%.
+The combination of (1) clearing Google verification, (2) shipping the P0/P1 product fixes to lift
+activation and protect churn, and (3) funding ~$1.5–3K/mo of disciplined acquisition on top of
+compounding SEO takes it to **80–98%**. The product is not the risk; distribution is — and the economics
+say distribution is affordable _if_ retention holds.
+
+---
+
 ## Path to 1,000 paying users — priority order
 
-The critical path is: (1) make it a daily driver, (2) build the reason to pay, (3) clear the gates to
-scale, (4) make it look as premium as it's priced.
+The Monte Carlo reorders this: **distribution is the binding constraint, gated by Google verification,
+protected by retention.** The critical path is (0) clear the scale gate, (1) protect the economics,
+(2) build the reason to pay, (3) fund distribution, (4) look as premium as priced.
 
-1. **P0-A** server-side scheduled-send/snooze/undo worker — a paid feature is currently broken.
-2. **P0-B** unified cross-account search — the single feature that converts demo → subscription.
-3. **P1 (security, path-to-scale):** revoke Google tokens on account removal + externalize in-process
-   state. Both are prerequisites for passing Google review and running >1 instance for 1,000 users.
-4. **P1 (experience):** list virtualization + pagination + Gmail `users.watch` push. This is the gap
-   between "fast first paint" and "my main email client."
+0. **Google OAuth verification** — revoke tokens on account removal (**P1-A security**) + apply for
+   verified status. This is the hard gate under the 100-user cap; _nothing scales past it._ First,
+   always.
+1. **P0-A** server-side scheduled-send/snooze/undo worker — a paid feature is currently broken, and
+   retention/trust is what keeps LTV:CAC above 3 so acquisition stays affordable.
+2. **P0-B** unified cross-account search — the single feature that converts demo → subscription and the
+   #1 driver of `activation` and `trial→paid` in the model.
+3. **Fund distribution** — ~$1.5–3K/mo disciplined ads (LTV:CAC ≈ 3.4 supports it) on top of a
+   compounding SEO investment targeting the "manage multiple Gmail accounts" cluster. This is the
+   dominant lever (r=+0.56 ad budget, +0.45 SEO); the base case fails for lack of it, not lack of product.
+4. **P1 (experience):** list virtualization + pagination + Gmail `users.watch` push + mobile PWA — the
+   gap between "fast first paint" and "my daily driver," and the churn protection that keeps ad ROI positive.
 5. **P1 (design):** purge the banned violet, collapse to one design system. Highest visual-impact,
    lowest-risk item on the list.
 6. **P1 (security/privacy-as-feature):** default-block remote images + drop the Clearbit leak — and
    market it. This audience buys privacy.
-7. **P2 batch:** login CSRF `state`, UTC calendar formatting, single icon system, resolve the theme
+7. **Keep the $15 card-upfront model** — the simulation validates it over no-card/freemium for reaching
+   paying users. Do not revert to the older freemium recommendation.
+8. **P2 batch:** login CSRF `state`, UTC calendar formatting, single icon system, resolve the theme
    toggle, licensed fonts, labels/filters.
 
 **One-line thesis:** the plumbing is already premium; the product isn't yet, because the thing you sell
