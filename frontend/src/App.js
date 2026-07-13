@@ -7,7 +7,7 @@ import {
 import { Group as PanelGroup } from 'react-resizable-panels';
 import { API_BASE, FILE_TYPES } from './utils/constants';
 import {
-  getAccountGradient, buildEmailSrcDoc, stripName, ensurePrefix,
+  getAccountGradient, buildEmailSrcDoc, emailHtmlHasRemoteImages, stripName, ensurePrefix,
   getEmailOnly, splitList, uniqLower, migrateLayoutStorage,
   formatRelativeEdit, getShortLabel,
   getDocEditUrl, getDocIcon, getDocEditorLabel, getRelativeTime, formatTime,
@@ -133,6 +133,16 @@ const AllTheMail = () => {
   // the top bar so users can see what's queued and cancel any of them.
   const [scheduledListOpen, setScheduledListOpen] = useState(false);
   const [includeAtmSignature, setIncludeAtmSignature] = useState(() => localStorage.getItem('atm_signature') !== 'false');
+  // Remote email images are blocked by default (privacy: tracking pixels leak
+  // opens + IP to senders). This mirrors the global localStorage pref that
+  // buildEmailSrcDoc reads, so flipping it here re-renders every reader.
+  const [loadRemoteImages, setLoadRemoteImages] = useState(() => {
+    try { return localStorage.getItem('atm_load_remote_images') === 'true'; } catch { return false; }
+  });
+  const enableRemoteImages = useCallback(() => {
+    try { localStorage.setItem('atm_load_remote_images', 'true'); } catch (e) {}
+    setLoadRemoteImages(true);
+  }, []);
 
   // Scheduled sends state
   const [scheduledSends, setScheduledSends] = useState(() => JSON.parse(localStorage.getItem('atm_scheduled_sends') || '[]'));
@@ -1535,7 +1545,7 @@ const AllTheMail = () => {
     setComposeError(null);
     const fid=composeFromAccountId; if(!fid){setComposeError('Select a sending account');return;} if(!composeTo.trim()){setComposeError('Recipient is required');return;}
     setComposeSending(true);
-    const sigLine = includeAtmSignature ? '<br><div style="margin-top:16px;padding-top:12px;border-top:1px solid #eee;font-size:12px;color:#999;">Sent via <a href="https://allthemail.io" style="color:#8b7cff;text-decoration:none;">All The Mail</a></div>' : '';
+    const sigLine = includeAtmSignature ? '<br><div style="margin-top:16px;padding-top:12px;border-top:1px solid #eee;font-size:12px;color:#999;">Sent via <a href="https://allthemail.io" style="color:#FF3A1D;text-decoration:none;">All The Mail</a></div>' : '';
     const bodyWithSig = composeBody + sigLine;
     try{
       let r;
@@ -1731,6 +1741,7 @@ const AllTheMail = () => {
               mobileUnifiedFeed={mobileUnifiedFeed}
               connectedAccounts={connectedAccounts}
               activeView={activeView}
+              loadRemoteImages={loadRemoteImages} onShowImages={enableRemoteImages}
               slideOverEmail={slideOverEmail} openSlideOverEmail={openSlideOverEmail} closeSlideOver={closeSlideOver}
               slideOverDoc={slideOverDoc} openSlideOverDoc={openSlideOverDoc}
               isLoadingDocs={isLoadingDocs} isLoadingEvents={isLoadingEvents}
@@ -1775,6 +1786,7 @@ const AllTheMail = () => {
               {activeModule === 'mail' && (
                 <MailModule
                   splitMode={splitMode}
+                  loadRemoteImages={loadRemoteImages} onShowImages={enableRemoteImages}
                   fullPageReaderOpen={fullPageReaderOpen} setFullPageReaderOpen={setFullPageReaderOpen}
                   emails={emails} setEmails={setEmails}
                   selectedEmail={selectedEmail} setSelectedEmail={setSelectedEmail}
@@ -1910,7 +1922,13 @@ const AllTheMail = () => {
                     </div>
                   ) : (
                     <div className="email-body-wrapper" style={{ borderRadius: '8px', overflow: 'hidden' }}>
-                      <iframe title="Email preview" srcDoc={buildEmailSrcDoc(body)}
+                      {emailHtmlHasRemoteImages(body) && !loadRemoteImages && (
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', padding: '8px 12px', background: 'var(--bg-3)', borderBottom: '1px solid var(--line-0)', fontSize: '12px', color: 'var(--text-2)' }}>
+                          <span>Remote images are hidden to protect your privacy.</span>
+                          <button className="btn-ghost" style={{ fontSize: '12px', padding: '4px 10px', flexShrink: 0 }} onClick={enableRemoteImages}>Show images</button>
+                        </div>
+                      )}
+                      <iframe title="Email preview" srcDoc={buildEmailSrcDoc(body, { loadRemoteImages })}
                         scrolling="no"
                         sandbox="allow-same-origin allow-popups"
                         style={{ width: '100%', border: 'none', display: 'block', background: 'var(--email-bg)', minHeight: '120px' }}
@@ -1944,7 +1962,7 @@ const AllTheMail = () => {
                 <div style={{ padding: '32px 32px 24px' }}>
                   {grad && (<div style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', marginBottom: '16px', padding: '3px 10px 3px 6px', borderRadius: 'var(--r-pill)', background: grad.midRgba(0.08), fontSize: '11px', fontWeight: 500, color: 'var(--text-1)' }}><span className="account-dot" style={{ background: grad.gradient, width: 8, height: 8 }} />{accountName}</div>)}
                   <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '24px' }}>
-                    <div style={{ width: '44px', height: '44px', borderRadius: 'var(--r-sm)', background: 'rgba(139, 124, 255, 0.10)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}><DocPreviewIcon size={22} strokeWidth={1.5} style={{ color: 'var(--accent)' }} /></div>
+                    <div style={{ width: '44px', height: '44px', borderRadius: 'var(--r-sm)', background: 'rgba(255, 58, 29, 0.10)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}><DocPreviewIcon size={22} strokeWidth={1.5} style={{ color: 'var(--accent)' }} /></div>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <h1 style={{ fontSize: '20px', fontWeight: 600, letterSpacing: '-0.02em', color: 'var(--text-0)', margin: 0, lineHeight: 1.3 }}>{slideOverDoc.title}</h1>
                       <div style={{ fontSize: '12px', color: 'var(--text-2)', marginTop: '4px' }}>{fileType?.label || 'Document'}</div>

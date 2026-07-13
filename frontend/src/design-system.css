@@ -122,10 +122,11 @@
   --text-2: rgba(0, 0, 0, 0.44);
   --text-3: rgba(0, 0, 0, 0.42);
 
-  /* Accent — slightly deeper violet for contrast on white */
-  --accent: #7c6bf0;
-  --accent-weak: rgba(124, 107, 240, 0.12);
-  --accent-focus: rgba(124, 107, 240, 0.4);
+  /* Accent — signature red (brand.css canonical; DESIGN.md bans the legacy
+     violet AI-accent that used to live here). */
+  --accent: #FF3A1D;
+  --accent-weak: rgba(255, 58, 29, 0.12);
+  --accent-focus: rgba(255, 58, 29, 0.4);
   --accent-contrast: #ffffff;
 
   /* Surfaces */
@@ -158,13 +159,13 @@
 /* --- Light mode: app shell --- */
 [data-theme="light"] .app-container {
   background:
-    radial-gradient(1200px circle at 20% 0%, rgba(124, 107, 240, 0.04), transparent 60%),
+    radial-gradient(1200px circle at 20% 0%, rgba(255, 58, 29, 0.04), transparent 60%),
     linear-gradient(180deg, var(--bg-0) 0%, var(--bg-1) 100%);
 }
 
 [data-theme="light"] .app-loading {
   background:
-    radial-gradient(1200px circle at 20% 0%, rgba(124, 107, 240, 0.04), transparent 60%),
+    radial-gradient(1200px circle at 20% 0%, rgba(255, 58, 29, 0.04), transparent 60%),
     linear-gradient(180deg, var(--bg-0) 0%, var(--bg-1) 100%);
 }
 
@@ -176,7 +177,7 @@
 /* Intro burst — subtle in light */
 [data-theme="light"] .app-container.intro::before {
   background:
-    radial-gradient(900px circle at 20% 15%, rgba(124, 107, 240, 0.06), transparent 60%),
+    radial-gradient(900px circle at 20% 15%, rgba(255, 58, 29, 0.06), transparent 60%),
     radial-gradient(700px circle at 60% 85%, rgba(255, 140, 43, 0.03), transparent 62%);
 }
 
@@ -201,7 +202,7 @@
   border-color: rgba(0, 0, 0, 0.18);
 }
 [data-theme="light"] .account-pill.active {
-  background: rgba(124, 107, 240, 0.08);
+  background: rgba(255, 58, 29, 0.08);
 }
 [data-theme="light"] .account-pill-avatar {
   color: rgba(255, 255, 255, 0.92);
@@ -338,17 +339,17 @@
 [data-theme="light"] .ev-column-divider--mail-docs::after {
   background: linear-gradient(
     180deg,
-    rgba(124, 107, 240, 0.22) 0%,
-    rgba(124, 107, 240, 0.05) 50%,
-    rgba(124, 107, 240, 0.14) 100%
+    rgba(255, 58, 29, 0.22) 0%,
+    rgba(255, 58, 29, 0.05) 50%,
+    rgba(255, 58, 29, 0.14) 100%
   );
 }
 [data-theme="light"] .ev-column-divider--docs-cals::after {
   background: linear-gradient(
     180deg,
-    rgba(124, 107, 240, 0.14) 0%,
-    rgba(124, 107, 240, 0.05) 50%,
-    rgba(124, 107, 240, 0.22) 100%
+    rgba(255, 58, 29, 0.14) 0%,
+    rgba(255, 58, 29, 0.05) 50%,
+    rgba(255, 58, 29, 0.22) 100%
   );
 }
 
@@ -394,17 +395,17 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(139, 124, 255, 0.10);
+  background: rgba(255, 58, 29, 0.10);
   border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(139, 124, 255, 0.20);
+  background: rgba(255, 58, 29, 0.20);
 }
 
 * {
   scrollbar-width: thin;
-  scrollbar-color: rgba(139, 124, 255, 0.10) transparent;
+  scrollbar-color: rgba(255, 58, 29, 0.10) transparent;
 }
 
 /* ==========================================================
@@ -420,7 +421,7 @@ body {
   align-items: center;
   justify-content: center;
   background:
-    radial-gradient(1200px circle at 20% 0%, rgba(139, 124, 255, 0.07), transparent 60%),
+    radial-gradient(1200px circle at 20% 0%, rgba(255, 58, 29, 0.07), transparent 60%),
     var(--bg-0);
   /* Ensure gate matches app background even before tokens are applied */
   background-color: #0b0f14;
@@ -458,7 +459,7 @@ body {
 [data-theme="light"] .app-gate {
   background-color: #fefeff;
   background:
-    radial-gradient(1200px circle at 20% 0%, rgba(124, 107, 240, 0.04), transparent 60%),
+    radial-gradient(1200px circle at 20% 0%, rgba(255, 58, 29, 0.04), transparent 60%),
     #fefeff;
 }
 
@@ -470,7 +471,7 @@ body {
   justify-content: center;
   height: 100vh;
   background:
-    radial-gradient(1200px circle at 20% 0%, rgba(139, 124, 255, 0.07), transparent 60%),
+    radial-gradient(1200px circle at 20% 0%, rgba(255, 58, 29, 0.07), transparent 60%),
     linear-gradient(180deg, var(--bg-1) 0%, var(--bg-0) 100%);
   gap: 20px;
 }
@@ -519,7 +520,7 @@ body {
   width: 100%;
   position: relative;
   background:
-    radial-gradient(1200px circle at 20% 0%, rgba(139, 124, 255, 0.07), transparent 60%),
+    radial-gradient(1200px circle at 20% 0%, rgba(255, 58, 29, 0.07), transparent 60%),
     linear-gradient(180deg, var(--bg-1) 0%, var(--bg-0) 100%);
   color: var(--text-0);
 }
@@ -543,7 +544,7 @@ body {
   pointer-events: none;
   z-index: 0;
   background:
-    radial-gradient(900px circle at 20% 15%, rgba(139, 124, 255, 0.10), transparent 60%),
+    radial-gradient(900px circle at 20% 15%, rgba(255, 58, 29, 0.10), transparent 60%),
     radial-gradient(700px circle at 60% 85%, rgba(255, 140, 43, 0.06), transparent 62%);
   animation: burstIn 900ms var(--ease) forwards;
 }
@@ -766,7 +767,7 @@ body {
 .account-pill.active {
   border-color: var(--accent);
   color: var(--text-0);
-  background: rgba(139, 124, 255, 0.06);
+  background: rgba(255, 58, 29, 0.06);
 }
 
 .account-pill-avatar {
@@ -1870,18 +1871,18 @@ select:focus-visible {
 .ev-column-divider--mail-docs::after {
   background: linear-gradient(
     180deg,
-    rgba(139, 124, 255, 0.30) 0%,
-    rgba(139, 124, 255, 0.06) 50%,
-    rgba(139, 124, 255, 0.18) 100%
+    rgba(255, 58, 29, 0.30) 0%,
+    rgba(255, 58, 29, 0.06) 50%,
+    rgba(255, 58, 29, 0.18) 100%
   );
 }
 
 .ev-column-divider--docs-cals::after {
   background: linear-gradient(
     180deg,
-    rgba(139, 124, 255, 0.18) 0%,
-    rgba(139, 124, 255, 0.06) 50%,
-    rgba(139, 124, 255, 0.30) 100%
+    rgba(255, 58, 29, 0.18) 0%,
+    rgba(255, 58, 29, 0.06) 50%,
+    rgba(255, 58, 29, 0.30) 100%
   );
 }
 
@@ -2955,7 +2956,7 @@ select:focus-visible {
   z-index: 0;
 }
 .email-item[data-swipe="left"]::before {
-  background: linear-gradient(to left, rgba(139, 124, 255, 0.14) 0%, transparent 70%);
+  background: linear-gradient(to left, rgba(255, 58, 29, 0.14) 0%, transparent 70%);
 }
 .email-item[data-swipe="right"]::before {
   background: linear-gradient(to right, rgba(255, 59, 59, 0.14) 0%, transparent 70%);
@@ -3281,7 +3282,7 @@ select:focus-visible {
 
 .ql-toolbar.ql-snow button:focus-visible,
 .ql-container.ql-snow:focus-visible {
-  outline: 2px solid rgba(139, 124, 255, 0.35) !important;
+  outline: 2px solid rgba(255, 58, 29, 0.35) !important;
   outline-offset: 2px !important;
 }
 
@@ -3293,13 +3294,13 @@ select:focus-visible {
 .field-row select:focus {
   border-color: var(--accent);
   outline: none;
-  box-shadow: 0 0 0 2px rgba(139, 124, 255, 0.15);
+  box-shadow: 0 0 0 2px rgba(255, 58, 29, 0.15);
 }
 
 [data-theme="light"] .field-row input:focus,
 [data-theme="light"] .field-row textarea:focus,
 [data-theme="light"] .field-row select:focus {
-  box-shadow: 0 0 0 2px rgba(124, 107, 240, 0.12);
+  box-shadow: 0 0 0 2px rgba(255, 58, 29, 0.12);
 }
 
 .field-row input:disabled,
@@ -3782,7 +3783,7 @@ select:focus-visible {
 }
 
 .avatar-btn:focus-visible {
-  outline: 2px solid rgba(139, 124, 255, 0.35);
+  outline: 2px solid rgba(255, 58, 29, 0.35);
   outline-offset: 2px;
 }
 
@@ -3885,7 +3886,7 @@ select:focus-visible {
 }
 
 .plan-badge.pro {
-  background: rgba(139, 124, 255, 0.18);
+  background: rgba(255, 58, 29, 0.18);
   color: var(--accent);
 }
 
@@ -4654,7 +4655,7 @@ select:focus-visible {
   font-weight: 500;
   background: var(--accent-weak);
   color: var(--accent);
-  border: 1px solid rgba(139,124,255,0.25);
+  border: 1px solid rgba(255, 58, 29,0.25);
   white-space: nowrap;
 }
 .label-chip-system {
