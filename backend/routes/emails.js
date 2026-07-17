@@ -447,6 +447,104 @@ router.post('/:accountId/batch-bodies', authenticateToken, async (req, res) => {
 });
 
 // Get email detail
+// Contacts autocomplete: scan the user's recent SENT emails, extract
+// every To/Cc/Bcc address, rank by frequency, return top N. Sent-folder
+// scan is the strongest "people I email" signal — far better than just
+// inbox From because it filters out marketing/transactional senders.
+//
+// Why not the People API: would require adding contacts.readonly to our
+// OAuth scopes, which forces every existing user to re-consent. Not
+// worth it for v1; sent-folder extraction covers the high-value case
+// (people you email regularly) and adds zero scope surface.
+//
+// NOTE: this literal route MUST be registered before the `/:accountId/:messageId`
+// param route below — otherwise Express matches `/:accountId/contacts` as a
+// message fetch with messageId="contacts" and the endpoint is shadowed.
+router.get('/:accountId/contacts', authenticateToken, async (req, res) => {
+  try {
+    const { accountId } = req.params;
+
+    // Verify ownership BEFORE any cache read, and key the cache by
+    // (userId, accountId) — never accountId alone. This guarantees one user is
+    // never served another user's cached contacts for the same account id, and
+    // that a non-owned account can never return cached data.
+    const account = await verifyAccountOwnership(accountId, req.userId);
+    if (!account) return res.status(404).json({ error: 'Account not found' });
+
+    const cacheKey = `${req.userId}:${accountId}`;
+    const cached = _contactsCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return res.json({ contacts: cached.contacts });
+    }
+
+    const client = await getOAuth2ClientForAccount(accountId, req.userId);
+    const gmail = google.gmail({ version: 'v1', auth: client });
+
+    // List sent message ids — Gmail's q syntax filters server-side, so we
+    // only burn quota on the SENT label.
+    const list = await gmail.users.messages.list({
+      userId: 'me',
+      labelIds: ['SENT'],
+      maxResults: CONTACTS_SCAN_LIMIT,
+    });
+    const ids = (list.data.messages || []).map(m => m.id);
+
+    if (ids.length === 0) {
+      _contactsCache.set(cacheKey, { contacts: [], expiresAt: Date.now() + CONTACTS_CACHE_TTL_MS });
+      return res.json({ contacts: [] });
+    }
+
+    // Fetch headers only — format=metadata + metadataHeaders limits the
+    // payload to ~1 KB per message instead of pulling full bodies.
+    const headerFetches = ids.map(id =>
+      gmail.users.messages.get({
+        userId: 'me',
+        id,
+        format: 'metadata',
+        metadataHeaders: ['To', 'Cc', 'Bcc'],
+      }).catch(() => null) // Tolerate per-message failures (deleted etc.)
+    );
+    const messages = (await Promise.all(headerFetches)).filter(Boolean);
+
+    // Aggregate: count occurrences, keep the longest non-empty name we've
+    // seen (some messages have just an email, others "Name <email>").
+    const tally = new Map(); // email → { email, name, count }
+    for (const m of messages) {
+      const headers = m?.data?.payload?.headers || [];
+      for (const h of headers) {
+        if (!['To', 'Cc', 'Bcc'].includes(h.name)) continue;
+        for (const tok of splitAddressHeader(h.value)) {
+          const parsed = parseAddress(tok);
+          if (!parsed) continue;
+          // Skip the user's own address — they don't need to autocomplete to themselves
+          if (parsed.email === account.gmail_email?.toLowerCase()) continue;
+          const existing = tally.get(parsed.email);
+          if (existing) {
+            existing.count += 1;
+            if (parsed.name && parsed.name.length > (existing.name || '').length) {
+              existing.name = parsed.name;
+            }
+          } else {
+            tally.set(parsed.email, { email: parsed.email, name: parsed.name, count: 1 });
+          }
+        }
+      }
+    }
+
+    const contacts = [...tally.values()]
+      .sort((a, b) => b.count - a.count)
+      .slice(0, CONTACTS_RETURN_LIMIT);
+
+    _contactsCache.set(cacheKey, { contacts, expiresAt: Date.now() + CONTACTS_CACHE_TTL_MS });
+    res.json({ contacts });
+  } catch (err) {
+    safeLogError('contacts list', err, { accountId: req.params.accountId });
+    const mapped = mapGoogleError(err, { accountId: req.params.accountId, group: 'mail' });
+    if (mapped) return res.status(mapped.status).json(mapped.body);
+    res.status(500).json({ error: 'Failed to load contacts' });
+  }
+});
+
 router.get('/:accountId/:messageId', authenticateToken, async (req, res) => {
   try {
     const { accountId, messageId } = req.params;
@@ -935,7 +1033,7 @@ router.post('/:accountId/batch', authenticateToken, async (req, res) => {
 // scans is the expensive part — Gmail's API is per-message, and we read
 // up to 200 messages per refresh. Cache for 30 minutes per account so
 // repeated compose-modal opens don't re-scan.
-const _contactsCache = new Map(); // accountId → { contacts, expiresAt }
+const _contactsCache = new Map(); // `${userId}:${accountId}` → { contacts, expiresAt }
 const CONTACTS_CACHE_TTL_MS = 30 * 60 * 1000;
 const CONTACTS_SCAN_LIMIT = 200;
 const CONTACTS_RETURN_LIMIT = 250;
@@ -978,94 +1076,5 @@ function splitAddressHeader(header) {
   if (current.trim()) parts.push(current.trim());
   return parts;
 }
-
-// Contacts autocomplete: scan the user's recent SENT emails, extract
-// every To/Cc/Bcc address, rank by frequency, return top N. Sent-folder
-// scan is the strongest "people I email" signal — far better than just
-// inbox From because it filters out marketing/transactional senders.
-//
-// Why not the People API: would require adding contacts.readonly to our
-// OAuth scopes, which forces every existing user to re-consent. Not
-// worth it for v1; sent-folder extraction covers the high-value case
-// (people you email regularly) and adds zero scope surface.
-router.get('/:accountId/contacts', authenticateToken, async (req, res) => {
-  try {
-    const { accountId } = req.params;
-
-    const cached = _contactsCache.get(accountId);
-    if (cached && cached.expiresAt > Date.now()) {
-      return res.json({ contacts: cached.contacts });
-    }
-
-    const account = await verifyAccountOwnership(accountId, req.userId);
-    if (!account) return res.status(404).json({ error: 'Account not found' });
-
-    const client = await getOAuth2ClientForAccount(accountId, req.userId);
-    const gmail = google.gmail({ version: 'v1', auth: client });
-
-    // List sent message ids — Gmail's q syntax filters server-side, so we
-    // only burn quota on the SENT label.
-    const list = await gmail.users.messages.list({
-      userId: 'me',
-      labelIds: ['SENT'],
-      maxResults: CONTACTS_SCAN_LIMIT,
-    });
-    const ids = (list.data.messages || []).map(m => m.id);
-
-    if (ids.length === 0) {
-      _contactsCache.set(accountId, { contacts: [], expiresAt: Date.now() + CONTACTS_CACHE_TTL_MS });
-      return res.json({ contacts: [] });
-    }
-
-    // Fetch headers only — format=metadata + metadataHeaders limits the
-    // payload to ~1 KB per message instead of pulling full bodies.
-    const headerFetches = ids.map(id =>
-      gmail.users.messages.get({
-        userId: 'me',
-        id,
-        format: 'metadata',
-        metadataHeaders: ['To', 'Cc', 'Bcc'],
-      }).catch(() => null) // Tolerate per-message failures (deleted etc.)
-    );
-    const messages = (await Promise.all(headerFetches)).filter(Boolean);
-
-    // Aggregate: count occurrences, keep the longest non-empty name we've
-    // seen (some messages have just an email, others "Name <email>").
-    const tally = new Map(); // email → { email, name, count }
-    for (const m of messages) {
-      const headers = m?.data?.payload?.headers || [];
-      for (const h of headers) {
-        if (!['To', 'Cc', 'Bcc'].includes(h.name)) continue;
-        for (const tok of splitAddressHeader(h.value)) {
-          const parsed = parseAddress(tok);
-          if (!parsed) continue;
-          // Skip the user's own address — they don't need to autocomplete to themselves
-          if (parsed.email === account.gmail_email?.toLowerCase()) continue;
-          const existing = tally.get(parsed.email);
-          if (existing) {
-            existing.count += 1;
-            if (parsed.name && parsed.name.length > (existing.name || '').length) {
-              existing.name = parsed.name;
-            }
-          } else {
-            tally.set(parsed.email, { email: parsed.email, name: parsed.name, count: 1 });
-          }
-        }
-      }
-    }
-
-    const contacts = [...tally.values()]
-      .sort((a, b) => b.count - a.count)
-      .slice(0, CONTACTS_RETURN_LIMIT);
-
-    _contactsCache.set(accountId, { contacts, expiresAt: Date.now() + CONTACTS_CACHE_TTL_MS });
-    res.json({ contacts });
-  } catch (err) {
-    safeLogError('contacts list', err, { accountId: req.params.accountId });
-    const mapped = mapGoogleError(err, { accountId: req.params.accountId, group: 'mail' });
-    if (mapped) return res.status(mapped.status).json(mapped.body);
-    res.status(500).json({ error: 'Failed to load contacts' });
-  }
-});
 
 export default router;

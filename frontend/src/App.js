@@ -15,6 +15,7 @@ import {
 } from './utils/helpers';
 import { attributionPayload } from './utils/attribution';
 import { maybeHandleApiError } from './utils/apiErrors';
+import { emailKey, sameMailItem } from './utils/mailIdentity';
 import * as analytics from './utils/analytics';
 import { useSignatures } from './hooks/useSignatures';
 
@@ -1273,20 +1274,20 @@ const AllTheMail = () => {
         if (!inInput && activeModule === 'mail') {
           if (e.key === 'j') {
             e.preventDefault();
-            const idx = selectedEmail ? filteredEmails.findIndex(x => x.id === selectedEmail.id) : -1;
+            const idx = selectedEmail ? filteredEmails.findIndex(x => sameMailItem(x, selectedEmail)) : -1;
             const ni = Math.min(idx + 1, filteredEmails.length - 1);
             if (ni >= 0 && filteredEmails[ni]) { const ne = filteredEmails[ni]; setSelectedEmail(ne); loadEmailDetails(ne); loadThread(ne); }
             return;
           }
           if (e.key === 'k') {
             e.preventDefault();
-            const idx = selectedEmail ? filteredEmails.findIndex(x => x.id === selectedEmail.id) : filteredEmails.length;
+            const idx = selectedEmail ? filteredEmails.findIndex(x => sameMailItem(x, selectedEmail)) : filteredEmails.length;
             const ni = Math.max(idx - 1, 0);
             if (filteredEmails[ni]) { const ne = filteredEmails[ni]; setSelectedEmail(ne); loadEmailDetails(ne); loadThread(ne); }
             return;
           }
           if (e.key === 'u' && selectedEmail) { e.preventDefault(); setSelectedEmail(null); setFullPageReaderOpen(false); return; }
-          if (e.key === 'x' && selectedEmail) { e.preventDefault(); toggleSelectId(selectedEmail.id); return; }
+          if (e.key === 'x' && selectedEmail) { e.preventDefault(); toggleSelectId(selectedEmail); return; }
           if (e.key === 's' && selectedEmail) { e.preventDefault(); starEmail(selectedEmail); return; }
           if (e.key === 'a' && selectedEmail) { e.preventDefault(); shortcutsRef.current.openCompose?.('replyAll', selectedEmail); return; }
           if (e.key === 'f' && selectedEmail) { e.preventDefault(); shortcutsRef.current.openCompose?.('forward', selectedEmail); return; }
@@ -1377,7 +1378,7 @@ const AllTheMail = () => {
     setComposeFromAccountId(defaultFrom);
     let to='',cc='',bcc='',subject='',body='';
     if(mode!=='compose'&&email){
-      await loadEmailDetails(email); const h=emailHeaders[email.id]||{};
+      await loadEmailDetails(email); const h=emailHeaders[emailKey(email)]||{};
       const oFrom=h.replyTo||h.from||email.from||'',oTo=h.to||'',oCc=h.cc||'',oSubj=h.subject||email.subject||'';
       if(mode==='reply'){to=getEmailOnly(oFrom);subject=ensurePrefix(oSubj,'Re:');body=`\n\n--- Original message ---\n${stripName(oFrom)}\n${email.snippet||''}\n`;}
       if(mode==='replyAll'){const me=(connectedAccounts.find(a=>a.id===defaultFrom)?.gmail_email||'').toLowerCase();const tl=uniqLower(splitList(getEmailOnly(oFrom)));const cl=uniqLower([...splitList(oTo),...splitList(oCc)]);const tf=tl.filter(x=>getEmailOnly(x).toLowerCase()!==me);const cf=cl.filter(x=>getEmailOnly(x).toLowerCase()!==me);to=(tf[0]||getEmailOnly(oFrom)).trim();cc=uniqLower([...tf.slice(1),...cf]).join(', ');subject=ensurePrefix(oSubj,'Re:');body=`\n\n--- Original message ---\n${stripName(oFrom)}\n${email.snippet||''}\n`;}
@@ -1890,9 +1891,9 @@ const AllTheMail = () => {
             {slideOverIndex !== null && (<span className="slide-over-position">{slideOverIndex + 1} / {slideOverEmail ? evFilteredEmails.slice(0, 50).length : evFilteredDocs.length}</span>)}
             <button className="slide-over-close" onClick={closeSlideOver} title="Close"><X size={16} strokeWidth={1.5} /></button>
             {slideOverEmail && (() => {
-              const eid = slideOverEmail.id;
-              const body = emailBodies[eid];
-              const headers = emailHeaders[eid];
+              const ekey = emailKey(slideOverEmail);
+              const body = emailBodies[ekey];
+              const headers = emailHeaders[ekey];
               const accountIndex = connectedAccounts.findIndex(a => a.id === slideOverEmail.accountId);
               const grad = accountIndex !== -1 ? getAccountGradient(accountIndex) : null;
               const accountName = connectedAccounts[accountIndex]?.account_name || connectedAccounts[accountIndex]?.gmail_email || '';
@@ -1912,7 +1913,7 @@ const AllTheMail = () => {
                     <button className="btn-ghost" style={{ fontSize: '12px', padding: '6px 12px' }} onClick={() => { closeSlideOver(); openCompose('reply', slideOverEmail); }}><Reply size={14} strokeWidth={1.5} /> Reply</button>
                     <button className="btn-ghost" style={{ fontSize: '12px', padding: '6px 12px' }} onClick={async () => {
                       const aid = slideOverEmail.accountId || connectedAccounts[0]?.id; if (!aid) return;
-                      try { await fetch(`${API_BASE}/emails/${aid}/${slideOverEmail.id}/archive`, { method: 'POST', credentials: 'include' }); setEmails(p => { const n = { ...p }; Object.keys(n).forEach(ai => { Object.keys(n[ai]).forEach(c => { if (n[ai][c]) n[ai][c] = n[ai][c].filter(e => e.id !== slideOverEmail.id); }); }); return n; }); closeSlideOver(); } catch (err) { setError('Failed to archive'); }
+                      try { await fetch(`${API_BASE}/emails/${aid}/${slideOverEmail.id}/archive`, { method: 'POST', credentials: 'include' }); setEmails(p => { const acc = p[aid]; if (!acc) return p; const u = {}; for (const c of Object.keys(acc)) u[c] = (acc[c] || []).filter(e => e.id !== slideOverEmail.id); return { ...p, [aid]: u }; }); closeSlideOver(); } catch (err) { setError('Failed to archive'); }
                     }}><Archive size={14} strokeWidth={1.5} /> Archive</button>
                   </div>
                   <div style={{ height: '1px', background: 'var(--line-0)', marginBottom: '20px' }} />

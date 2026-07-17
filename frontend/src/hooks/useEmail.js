@@ -3,6 +3,7 @@ import { API_BASE } from '../utils/constants';
 import { stripName } from '../utils/helpers';
 import { getCached, setCached, setManyCached, hydrateForIds, maybeEvict, setCachedList, hydrateLists } from '../utils/emailCache';
 import { maybeHandleApiError } from '../utils/apiErrors';
+import { mailKey, threadKey, emailKey, sameMailItem } from '../utils/mailIdentity';
 
 export function useEmail({
   connectedAccounts,
@@ -209,9 +210,14 @@ export function useEmail({
   const loadEmailDetails = useCallback(async (email) => {
     if (!email?.id) return;
     const eid = email.id;
-    if (emailBodiesRef.current[eid] && emailHeadersRef.current[eid]) return;
     const aid = email.accountId || connectedAccounts[0]?.id;
     if (!aid) return;
+    // Composite (account + message) identity — bodies/headers/attachments are a
+    // single cross-account map, so keying by the bare message id would let one
+    // account's body satisfy another account's colliding id (and short-circuit
+    // the account-aware IDB read below).
+    const key = mailKey(aid, eid);
+    if (emailBodiesRef.current[key] && emailHeadersRef.current[key]) return;
 
     // Stale-while-revalidate: if we have a persisted copy, render it
     // instantly so the reader pane never blanks. The network refresh
@@ -221,9 +227,9 @@ export function useEmail({
       const cached = await getCached(aid, eid);
       if (cached?.body) {
         cacheHit = true;
-        setEmailBodies(p => p[eid] === cached.body ? p : { ...p, [eid]: cached.body });
-        if (cached.headers) setEmailHeaders(p => p[eid] ? p : { ...p, [eid]: cached.headers });
-        if (cached.attachments?.length) setEmailAttachments(p => p[eid] ? p : { ...p, [eid]: cached.attachments });
+        setEmailBodies(p => p[key] === cached.body ? p : { ...p, [key]: cached.body });
+        if (cached.headers) setEmailHeaders(p => p[key] ? p : { ...p, [key]: cached.headers });
+        if (cached.attachments?.length) setEmailAttachments(p => p[key] ? p : { ...p, [key]: cached.attachments });
       }
     } catch { /* ignore */ }
 
@@ -235,13 +241,20 @@ export function useEmail({
       if (r.ok) {
         setIsAuthed(true);
         const d = await r.json();
-        setEmailBodies(p => { const u = { ...p, [eid]: d.body }; const k = Object.keys(u); if (k.length > 500) k.slice(0, k.length - 500).forEach(x => delete u[x]); return u; });
-        if (d.headers) setEmailHeaders(p => { const u = { ...p, [eid]: d.headers }; const k = Object.keys(u); if (k.length > 500) k.slice(0, k.length - 500).forEach(x => delete u[x]); return u; });
-        if (d.attachments) setEmailAttachments(p => { const u = { ...p, [eid]: d.attachments }; const k = Object.keys(u); if (k.length > 500) k.slice(0, k.length - 500).forEach(x => delete u[x]); return u; });
+        setEmailBodies(p => { const u = { ...p, [key]: d.body }; const k = Object.keys(u); if (k.length > 500) k.slice(0, k.length - 500).forEach(x => delete u[x]); return u; });
+        if (d.headers) setEmailHeaders(p => { const u = { ...p, [key]: d.headers }; const k = Object.keys(u); if (k.length > 500) k.slice(0, k.length - 500).forEach(x => delete u[x]); return u; });
+        if (d.attachments) setEmailAttachments(p => { const u = { ...p, [key]: d.attachments }; const k = Object.keys(u); if (k.length > 500) k.slice(0, k.length - 500).forEach(x => delete u[x]); return u; });
         // Persist to IDB so the next session is instant.
         setCached(aid, eid, d.body, d.headers, d.attachments).catch(() => {});
         if (!email.isRead) {
-          setEmails(p => { const n = { ...p }; Object.keys(n).forEach(ai => { Object.keys(n[ai]).forEach(c => { if (n[ai][c]) n[ai][c] = n[ai][c].map(e => e.id === eid ? { ...e, isRead: true } : e); }); }); return n; });
+          // Scope the optimistic read-mark to the acted-on account only — a
+          // colliding message id in another account must not be flipped.
+          setEmails(p => {
+            const acc = p[aid]; if (!acc) return p;
+            const u = {};
+            for (const c of Object.keys(acc)) u[c] = (acc[c] || []).map(e => e.id === eid ? { ...e, isRead: true } : e);
+            return { ...p, [aid]: u };
+          });
           fetch(`${API_BASE}/emails/${aid}/${eid}/read`, { method: 'POST', credentials: 'include' }).catch(() => {});
         }
       } else if (r.status === 401) {
@@ -326,7 +339,9 @@ export function useEmail({
 
     const threadMap = new Map();
     for (const email of list) {
-      const tid = email.threadId || email.id;
+      // Group by (account, threadId) — two accounts sharing a provider-local
+      // threadId are distinct conversations and must not be merged.
+      const tid = threadKey(email.accountId, email.threadId || email.id);
       if (!threadMap.has(tid)) {
         threadMap.set(tid, { emails: [], newest: email });
       }
@@ -370,7 +385,9 @@ export function useEmail({
       });
     });
     const seen = new Set();
-    return all.filter(e => { if (seen.has(e.id) || isSnoozed(e)) return false; seen.add(e.id); return true; })
+    // Dedup by composite (account, id): the same provider-local id in two
+    // accounts is two different messages and both must survive search.
+    return all.filter(e => { const k = emailKey(e); if (seen.has(k) || isSnoozed(e)) return false; seen.add(k); return true; })
       .sort((a, b) => new Date(b.date) - new Date(a.date));
   }, [getCurrentEmails, searchQuery, snoozedEmails, connectedAccounts, emails]);
 
@@ -390,13 +407,17 @@ export function useEmail({
   }, [emails, connectedAccounts]);
 
   const clearSelection = useCallback(() => setSelectedIds(new Set()), []);
-  const toggleSelectId = useCallback((id) => { setSelectedIds(p => { const n = new Set(p); if (n.has(id)) n.delete(id); else n.add(id); return n; }); }, []);
-  const selectAllVisible = useCallback(() => { setSelectedIds(() => new Set(filteredEmails.map(e => e.id))); }, [filteredEmails]);
+  // selectedIds holds composite (account, id) keys so selecting a message in
+  // one account never selects a colliding-id message in another. Callers pass
+  // the full email object; the mutation target is later rebuilt from each
+  // item's own fields (never by parsing the key).
+  const toggleSelectId = useCallback((email) => { const k = emailKey(email); setSelectedIds(p => { const n = new Set(p); if (n.has(k)) n.delete(k); else n.add(k); return n; }); }, []);
+  const selectAllVisible = useCallback(() => { setSelectedIds(() => new Set(filteredEmails.map(e => emailKey(e)))); }, [filteredEmails]);
 
   const groupSelectedByAccount = useCallback(() => {
     const m = new Map();
     for (const e of filteredEmails) {
-      if (!selectedIds.has(e.id)) continue;
+      if (!selectedIds.has(emailKey(e))) continue;
       const a = e.accountId; if (!a) continue;
       if (!m.has(a)) m.set(a, []);
       m.get(a).push(e.id);
@@ -412,7 +433,7 @@ export function useEmail({
     if (!email?.id || !email?.accountId) return;
     const snapshot = { ...emails };
     removeEmailIds(email.accountId, [email.id]);
-    if (selectedEmail?.id === email.id) {
+    if (sameMailItem(selectedEmail, email)) {
       setSelectedEmail(null); setSelectedThread(null); setSelectedThreadActiveMessageId(null);
       if (setShowMetadata) setShowMetadata(false);
       if (setFullPageReaderOpen) setFullPageReaderOpen(false);
@@ -433,7 +454,7 @@ export function useEmail({
     if (!email?.id || !email?.accountId) return;
     const snapshot = { ...emails };
     removeEmailIds(email.accountId, [email.id]);
-    if (selectedEmail?.id === email.id) {
+    if (sameMailItem(selectedEmail, email)) {
       setSelectedEmail(null); setSelectedThread(null); setSelectedThreadActiveMessageId(null);
       if (setShowMetadata) setShowMetadata(false);
       if (setFullPageReaderOpen) setFullPageReaderOpen(false);
@@ -452,7 +473,8 @@ export function useEmail({
 
   const starEmail = useCallback(async (email) => {
     if (!email?.id || !email?.accountId) return;
-    const key = email.id;
+    // Composite key so a star toggle stays on the acted-on account's message.
+    const key = emailKey(email);
     const currentlyStarred = starredOverrides[key] !== undefined ? starredOverrides[key] : email.isStarred;
     const newStarred = !currentlyStarred;
     setStarredOverrides(prev => ({ ...prev, [key]: newStarred }));
@@ -483,7 +505,9 @@ export function useEmail({
       );
       const all = results.flat().sort((a, b) => new Date(b.date) - new Date(a.date));
       const seen = new Set();
-      const deduped = all.filter(e => { if (seen.has(e.id)) return false; seen.add(e.id); return true; });
+      // Dedup by composite (account, id) so identical provider-local ids across
+      // accounts both survive the merged result set.
+      const deduped = all.filter(e => { const k = emailKey(e); if (seen.has(k)) return false; seen.add(k); return true; });
       setEmails(prev => {
         const n = { ...prev };
         connectedAccounts.forEach(a => {
@@ -501,7 +525,7 @@ export function useEmail({
     const byAccount = groupSelectedByAccount();
     const affectedIds = new Set(selectedIds);
     byAccount.forEach((ids, aid) => removeEmailIds(aid, ids));
-    if (selectedEmail && affectedIds.has(selectedEmail.id)) {
+    if (selectedEmail && affectedIds.has(emailKey(selectedEmail))) {
       setSelectedEmail(null); setSelectedThread(null); setSelectedThreadActiveMessageId(null);
       if (setShowMetadata) setShowMetadata(false);
       if (setFullPageReaderOpen) setFullPageReaderOpen(false);
@@ -528,7 +552,7 @@ export function useEmail({
     setSnoozedEmails(prev => ({ ...prev, [key]: { emailId: email.id, accountId: email.accountId, until: until.toISOString() } }));
     setSnoozeDropdownEmailId(null);
     setSuccessToast({ message: `Snoozed until ${new Date(until).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })}` });
-    if (selectedEmail?.id === email.id) {
+    if (sameMailItem(selectedEmail, email)) {
       setSelectedEmail(null); setSelectedThread(null); setSelectedThreadActiveMessageId(null);
       if (setShowMetadata) setShowMetadata(false);
       if (setFullPageReaderOpen) setFullPageReaderOpen(false);
@@ -559,7 +583,7 @@ export function useEmail({
 
   const navigatePrev = useCallback(() => {
     if (!selectedEmail) return;
-    const i = filteredEmails.findIndex(e => e.id === selectedEmail.id);
+    const i = filteredEmails.findIndex(e => sameMailItem(e, selectedEmail));
     if (i > 0) {
       const p = filteredEmails[i - 1];
       setSelectedEmail(p);
@@ -571,7 +595,7 @@ export function useEmail({
 
   const navigateNext = useCallback(() => {
     if (!selectedEmail) return;
-    const i = filteredEmails.findIndex(e => e.id === selectedEmail.id);
+    const i = filteredEmails.findIndex(e => sameMailItem(e, selectedEmail));
     if (i < filteredEmails.length - 1) {
       const n = filteredEmails[i + 1];
       setSelectedEmail(n);
@@ -587,7 +611,7 @@ export function useEmail({
     if (setReaderCompact) setReaderCompact(false);
     loadEmailDetails(email); loadThread(email); setSelectedThreadActiveMessageId(email.id);
     if (splitMode === 'none' && setFullPageReaderOpen) setFullPageReaderOpen(true);
-    const idx = filteredEmails.findIndex(e => e.id === email.id);
+    const idx = filteredEmails.findIndex(e => sameMailItem(e, email));
     if (idx >= 0) filteredEmails.slice(idx + 1, idx + 26).forEach((e, i) => setTimeout(() => loadEmailDetails(e), (i + 1) * 50));
   }, [loadEmailDetails, loadThread, splitMode, filteredEmails, setShowMetadata, setReaderCompact, setFullPageReaderOpen]);
 
@@ -607,8 +631,9 @@ export function useEmail({
     const window = filteredEmails.slice(0, PREFETCH_WINDOW);
 
     // Stage 1 — IDB hydration. Done immediately, doesn't block the network stage.
+    // hydrateForIds returns composite-keyed maps, matching the body/header state.
     const hydrationTargets = window
-      .filter(e => !emailBodiesRef.current[e.id])
+      .filter(e => !emailBodiesRef.current[mailKey(e.accountId, e.id)])
       .map(e => ({ accountId: e.accountId, messageId: e.id }));
     if (hydrationTargets.length) {
       hydrateForIds(hydrationTargets).then(({ bodies, headers, attachments }) => {
@@ -624,7 +649,7 @@ export function useEmail({
     // hydration races to fill the cache before we ask the network.
     const byAccount = {};
     window.forEach(email => {
-      if (emailBodiesRef.current[email.id] && emailHeadersRef.current[email.id]) return;
+      if (emailBodiesRef.current[mailKey(email.accountId, email.id)] && emailHeadersRef.current[mailKey(email.accountId, email.id)]) return;
       const aid = email.accountId; if (!aid) return;
       if (!byAccount[aid]) byAccount[aid] = [];
       byAccount[aid].push(email.id);
@@ -647,12 +672,15 @@ export function useEmail({
           })
           .then(d => {
             if (!d?.bodies) return;
+            // Response is keyed by bare provider id (per-account endpoint); map
+            // it into the composite (account, id) key space of our state.
             const bodyMap = {}, headerMap = {}, attachMap = {};
             const idbItems = [];
             Object.entries(d.bodies).forEach(([id, data]) => {
-              bodyMap[id] = data.body;
-              headerMap[id] = data.headers;
-              attachMap[id] = data.attachments || [];
+              const k = mailKey(accountId, id);
+              bodyMap[k] = data.body;
+              headerMap[k] = data.headers;
+              attachMap[k] = data.attachments || [];
               idbItems.push({ accountId, messageId: id, body: data.body, headers: data.headers, attachments: data.attachments || [] });
             });
             setEmailBodies(p => ({ ...p, ...bodyMap }));

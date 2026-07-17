@@ -6,6 +6,22 @@ The `SourceChip` component displays a small badge indicating which account an em
 
 ---
 
+## Account Boundary Invariant (read before touching cross-account mail state)
+
+> Any mail item used in a cross-account context is identified by its connected **source account** *and* its **provider-local item ID** together. Bare message or thread IDs must **not** own cross-account state or behavior.
+
+Gmail message/thread IDs are unique only *within* one mailbox — two connected accounts can hold the same provider-local ID. In the Everything view, cross-account search, and batch actions those items coexist, so any map/set/comparison keyed on the bare ID silently collapses them (wrong body/headers, a message hidden from search, a star/selection bleeding across accounts, or a mutation hitting the wrong account's message).
+
+The canonical composite key lives in [`utils/mailIdentity.js`](../utils/mailIdentity.js): `mailKey(accountId, id)`, `threadKey(accountId, threadId)`, `emailKey(email)`, `emailThreadKey(email)`, and `sameMailItem(a, b)`. All cross-account body/header/attachment/prefetch/hydration/star/selection/search-dedup/conversation-grouping state and every active-row / reader / navigation comparison route through these helpers. `emailCache` reuses `mailKey` so its persisted IndexedDB key stays identical.
+
+Rules of thumb:
+- Never key a cross-account `Map`/`Set`/object or compare two items by a bare `.id`.
+- Optimistic read/archive/delete/label edits are scoped to the acted-on account (`state[accountId]`), never fanned across all accounts by id.
+- Mutation URLs come from the original item's own `accountId` + provider id. **Never** reconstruct a target by splitting a serialized key.
+- Snooze persistence (`atm_snoozed`, `${accountId}_${id}`) predates this module and keeps its own format — do not migrate it.
+
+---
+
 ## Import
 
 ```javascript
