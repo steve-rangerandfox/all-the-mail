@@ -14,8 +14,33 @@
 // appear ready with an empty quote" enforceable by the caller (await the body,
 // then build the session).
 
-import { stripName, getEmailOnly, ensurePrefix, splitList, uniqLower } from './helpers';
+import { stripName, getEmailOnly, ensurePrefix, splitList, uniqLower, sanitizeDocHtml } from './helpers';
 import { dedupeRecipients, excludeAddresses, stringifyRecipients } from './recipients';
+
+// HTML-escape a plain-text value bound for an HTML context. External email
+// header fields (sender, subject, recipients, date) are attacker-controllable,
+// so they must be literal text in the quoted block — never live markup.
+export function escapeHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/**
+ * Decide which Gmail draft id a reopened draft should use.
+ *   - the row's own draftId (list enrichment) wins;
+ *   - otherwise a server-resolved id;
+ *   - if neither is known, block (do NOT reopen as a new draft — that would
+ *     orphan/duplicate the original provider draft).
+ * @returns {{ draftId: string|null, block: boolean }}
+ */
+export function chooseReopenDraftId(rowDraftId, resolvedDraftId) {
+  const draftId = rowDraftId || resolvedDraftId || null;
+  return { draftId, block: !draftId };
+}
 
 /** A fully-blank composer session — the canonical empty shape. */
 export function blankComposerSession() {
@@ -98,24 +123,32 @@ export function computeRecipients({ mode, oFrom = '', oTo = '', oCc = '', selfEm
  */
 export function buildQuotedHtml({ mode, headers = {}, email = {}, fullBodyHtml = '' }) {
   const fromRaw = headers.from || email.from || '';
-  const dateStr = headers.date || (email.date ? new Date(email.date).toLocaleString() : '');
-  const bodyHtml = fullBodyHtml || (email.snippet ? `<p>${email.snippet}</p>` : '');
+  const fromName = escapeHtml(stripName(fromRaw));
+  const fromEmail = escapeHtml(getEmailOnly(fromRaw));
+  const dateStr = escapeHtml(headers.date || (email.date ? new Date(email.date).toLocaleString() : ''));
+  // Security boundary (invariant): the original body is external HTML — run it
+  // through the repository's canonical editable-HTML sanitizer BEFORE it ever
+  // reaches the composer/editor, and escape every header field as literal text.
+  // No parallel sanitizer: sanitizeDocHtml (utils/helpers) is the owner.
+  const bodyHtml = fullBodyHtml
+    ? sanitizeDocHtml(fullBodyHtml)
+    : (email.snippet ? `<p>${escapeHtml(email.snippet)}</p>` : '');
 
   if (mode === 'forward') {
     const lines = [
       '---------- Forwarded message ----------',
-      `From: ${stripName(fromRaw)} &lt;${getEmailOnly(fromRaw)}&gt;`,
+      `From: ${fromName} &lt;${fromEmail}&gt;`,
       `Date: ${dateStr}`,
-      `Subject: ${headers.subject || email.subject || ''}`,
-      `To: ${headers.to || ''}`,
+      `Subject: ${escapeHtml(headers.subject || email.subject || '')}`,
+      `To: ${escapeHtml(headers.to || '')}`,
     ];
-    if (headers.cc) lines.push(`Cc: ${headers.cc}`);
+    if (headers.cc) lines.push(`Cc: ${escapeHtml(headers.cc)}`);
     return `<br><br><div class="atm-quote gmail_quote">${lines.join('<br>')}<br><br>${bodyHtml}</div>`;
   }
 
   const attribution = dateStr
-    ? `On ${dateStr}, ${stripName(fromRaw)} &lt;${getEmailOnly(fromRaw)}&gt; wrote:`
-    : `${stripName(fromRaw)} wrote:`;
+    ? `On ${dateStr}, ${fromName} &lt;${fromEmail}&gt; wrote:`
+    : `${fromName} wrote:`;
   return (
     `<br><br><div class="atm-quote gmail_quote">${attribution}` +
     `<blockquote class="atm-quote-block gmail_quote" ` +

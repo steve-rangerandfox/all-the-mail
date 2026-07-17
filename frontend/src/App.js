@@ -8,7 +8,7 @@ import { Group as PanelGroup } from 'react-resizable-panels';
 import { API_BASE, FILE_TYPES } from './utils/constants';
 import {
   getAccountGradient, buildEmailSrcDoc, emailHtmlHasRemoteImages, stripName,
-  migrateLayoutStorage,
+  sanitizeDocHtml, migrateLayoutStorage,
   formatRelativeEdit, getShortLabel,
   getDocEditUrl, getDocIcon, getDocEditorLabel, getRelativeTime, formatTime,
   parseEventStart,
@@ -16,7 +16,7 @@ import {
 import { attributionPayload } from './utils/attribution';
 import { maybeHandleApiError } from './utils/apiErrors';
 import { emailKey, sameMailItem } from './utils/mailIdentity';
-import { buildComposerSession, blankComposerSession, composerHasContent, recomputeForFrom } from './utils/composerSession';
+import { buildComposerSession, blankComposerSession, composerHasContent, recomputeForFrom, chooseReopenDraftId } from './utils/composerSession';
 import { createUndoQueue } from './utils/undoQueue';
 import { validateFiles } from './utils/attachments';
 import * as analytics from './utils/analytics';
@@ -1528,6 +1528,20 @@ const AllTheMail = () => {
   // Restores sending account, recipients, subject, body, and the Gmail draft id.
   const reopenDraft = useCallback(async (email) => {
     if (!(await preserveBeforeReplace())) return;
+    // Canonical provider draft identity. Prefer the row's enriched draftId; if
+    // absent (e.g. >1 page of drafts), resolve it server-side. If it still can't
+    // be resolved, BLOCK editing with recoverable feedback rather than reopening
+    // as a new draft (which would orphan/duplicate the original).
+    let resolved = null;
+    if (!email.draftId && email.accountId && email.id) {
+      try {
+        const r = await fetch(`${API_BASE}/emails/${email.accountId}/drafts/resolve/${email.id}`, { credentials: 'include' });
+        if (r.ok) { const d = await r.json().catch(() => null); resolved = d?.draftId || null; }
+      } catch (_) { /* handled by the block below */ }
+    }
+    const { draftId, block } = chooseReopenDraftId(email.draftId, resolved);
+    if (block) { emitToast({ message: 'Couldn’t open this draft for editing — please refresh and try again.' }); return; }
+
     const detail = await loadEmailDetails(email);
     if (!detail) { setError('Couldn’t load that draft. Please try again.'); return; }
     const h = detail.headers || {};
@@ -1535,16 +1549,18 @@ const AllTheMail = () => {
     s.mode = 'compose';
     s.originalEmail = email.threadId ? { threadId: email.threadId, accountId: email.accountId } : null;
     s.fromAccountId = email.accountId || connectedAccounts[0]?.id || '';
-    s.draftId = email.draftId || null;
+    s.draftId = draftId;
     s.to = h.to || '';
     s.cc = h.cc || '';
     s.bcc = h.bcc || '';
     s.subject = h.subject || email.subject || '';
-    s.body = detail.body || '';
+    // Draft bodies can embed previously-forwarded external HTML — sanitize
+    // before it enters the editor (same boundary as reply/forward quoting).
+    s.body = sanitizeDocHtml(detail.body || '');
     s.baselineBody = s.body;
     s.showCcBcc = !!(s.cc || s.bcc);
     applyComposerSession(s);
-  }, [preserveBeforeReplace, loadEmailDetails, connectedAccounts, applyComposerSession]);
+  }, [preserveBeforeReplace, loadEmailDetails, connectedAccounts, applyComposerSession, emitToast]);
 
   // Sync the keyboard shortcut callbacks ref now that they're defined. Keyboard
   // paths call these canonical operations so mouse and keyboard never diverge.

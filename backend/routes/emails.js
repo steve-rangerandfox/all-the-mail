@@ -6,6 +6,7 @@ import supabase from '../lib/supabase.js';
 import { getOAuth2ClientForAccount } from '../lib/google.js';
 import { batchGetMessages } from '../lib/gmailBatch.js';
 import { mapGoogleError } from '../lib/gmailErrors.js';
+import { resolveDraftId } from '../lib/drafts.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { requireAccountScope } from '../middleware/scopes.js';
 import { safeLogError } from '../lib/log.js';
@@ -840,6 +841,30 @@ router.post('/:accountId/drafts', authenticateToken, async (req, res) => {
     const mapped = mapGoogleError(error, { accountId: req.params.accountId, group: 'mail' });
     if (mapped) return res.status(mapped.status).json(mapped.body);
     res.status(500).json({ error: 'Failed to save draft' });
+  }
+});
+
+// Resolve a draft's canonical Gmail draft id from one of its message ids.
+// Used by the client when list enrichment didn't attach a draftId (e.g. more
+// than one page of drafts). 4-segment path — no collision with /:a/:msgId (2)
+// or /:a/:threadId/thread (3).
+router.get('/:accountId/drafts/resolve/:messageId', authenticateToken, async (req, res) => {
+  try {
+    const { accountId, messageId } = req.params;
+    const account = await verifyAccountOwnership(accountId, req.userId);
+    if (!account) return res.status(404).json({ error: 'Account not found' });
+
+    const client = await getOAuth2ClientForAccount(accountId, req.userId);
+    const gmail = google.gmail({ version: 'v1', auth: client });
+
+    const draftId = await resolveDraftId(gmail, messageId);
+    if (!draftId) return res.status(404).json({ error: 'Draft not found' });
+    res.json({ draftId });
+  } catch (error) {
+    safeLogError('emails resolve draft', error, { accountId: req.params.accountId });
+    const mapped = mapGoogleError(error, { accountId: req.params.accountId, group: 'mail' });
+    if (mapped) return res.status(mapped.status).json(mapped.body);
+    res.status(500).json({ error: 'Failed to resolve draft' });
   }
 });
 

@@ -1,6 +1,7 @@
 import {
   blankComposerSession, htmlToText, composerHasContent,
   computeRecipients, buildQuotedHtml, buildComposerSession, recomputeForFrom,
+  escapeHtml, chooseReopenDraftId,
 } from './composerSession';
 
 describe('composerSession — blank + content detection', () => {
@@ -119,5 +120,65 @@ describe('composerSession — buildComposerSession', () => {
     const { to, cc } = recomputeForFrom(s, 'me2@w.com');
     expect(cc).not.toContain('me2@w.com');
     expect(`${to} ${cc}`).toContain('me@z.com');
+  });
+});
+
+describe('composerSession — quoted-content sanitization (security boundary)', () => {
+  const H = (o = {}) => ({ from: 'Alice <a@x.com>', to: 'me@z.com', date: 'Jan 1', subject: 'Hi', ...o });
+  // Parse the produced HTML the way a browser would, then assert on the DOM —
+  // executability, not substrings (escaped text may legitimately contain the
+  // word "onerror"). innerHTML never executes scripts or fires img handlers.
+  const parse = (html) => { const d = document.createElement('div'); d.innerHTML = html; return d; };
+
+  test('escapeHtml neutralizes markup characters', () => {
+    expect(escapeHtml('<b>&"\'</b>')).toBe('&lt;b&gt;&amp;&quot;&#39;&lt;/b&gt;');
+  });
+
+  test('scripts in the original body produce no executable element', () => {
+    const d = parse(buildQuotedHtml({ mode: 'reply', headers: H(), email: {}, fullBodyHtml: '<p>hi</p><script>alert(1)</script>' }));
+    expect(d.querySelector('script')).toBeNull();
+    expect(d.textContent).toContain('hi');
+  });
+
+  test('event handlers and javascript: URLs are stripped from the body', () => {
+    const d = parse(buildQuotedHtml({ mode: 'forward', headers: H(), email: {}, fullBodyHtml: '<img src=x onerror="alert(1)"><a href="javascript:alert(1)">x</a>' }));
+    expect(d.querySelector('[onerror]')).toBeNull();
+    const a = d.querySelector('a');
+    if (a) expect(a.getAttribute('href') || '').not.toMatch(/javascript:/i);
+  });
+
+  test('malicious external header fields cannot create executable markup', () => {
+    const d = parse(buildQuotedHtml({
+      mode: 'forward',
+      headers: H({ from: '"<img src=x onerror=alert(1)>" <a@x.com>', subject: '</blockquote><script>alert(1)</script>', to: '<b>x</b>', cc: '<i>c</i>' }),
+      email: {},
+      fullBodyHtml: '<p>body</p>',
+    }));
+    expect(d.querySelector('script')).toBeNull();
+    expect(d.querySelector('[onerror]')).toBeNull();
+    // Headers are escaped text, so no injected <img>/<b>/<i> elements from them.
+    expect(d.querySelector('img')).toBeNull();
+    expect(d.querySelector('b')).toBeNull();
+    // The escaped subject is present as literal text.
+    expect(d.textContent).toContain('<script>');
+  });
+
+  test('buildComposerSession reply body is sanitized end-to-end', () => {
+    const s = buildComposerSession({ mode: 'reply', email: { from: 'a@x.com', date: '2024' }, fromAccountId: 'A', headers: H(), fullBodyHtml: '<script>evil()</script><p>ok</p>' });
+    const d = parse(s.body);
+    expect(d.querySelector('script')).toBeNull();
+    expect(d.textContent).toContain('ok');
+  });
+});
+
+describe('composerSession — canonical draft identity decision', () => {
+  test('row draftId wins', () => {
+    expect(chooseReopenDraftId('D1', null)).toEqual({ draftId: 'D1', block: false });
+  });
+  test('server-resolved id is used when the row lacks one', () => {
+    expect(chooseReopenDraftId(null, 'D2')).toEqual({ draftId: 'D2', block: false });
+  });
+  test('unresolved identity blocks (never reopen as a new draft)', () => {
+    expect(chooseReopenDraftId(null, null)).toEqual({ draftId: null, block: true });
   });
 });
