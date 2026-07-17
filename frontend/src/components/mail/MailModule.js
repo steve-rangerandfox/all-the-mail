@@ -2,8 +2,8 @@ import React, { useRef, useCallback } from 'react';
 import {
   Mail, Search, X, Archive, Trash2, CheckSquare, MinusSquare,
   Paperclip, Download, ArrowLeft, Star, Clock,
-  MoreHorizontal, ChevronLeft, ChevronRight, ChevronDown, ChevronUp,
-  Forward, Reply, Users, BellOff, MailOpen,
+  ChevronLeft, ChevronRight, ChevronDown, ChevronUp,
+  Forward, Reply, Users, BellOff, MailOpen, ShieldAlert,
 } from 'lucide-react';
 import { Panel, Separator as PanelResizeHandle, Group as PanelGroup } from 'react-resizable-panels';
 import Avatar from '../Avatar';
@@ -24,7 +24,7 @@ const MailModule = ({
   emailBodies, emailHeaders, emailAttachments,
   isLoadingEmails, isLoadingBody, isLoadingThread,
   emailLoadError,
-  editMode, setEditMode,
+  setEditMode,
   selectedIds,
   batchWorking,
   starredOverrides,
@@ -40,8 +40,11 @@ const MailModule = ({
   downloadAttachment,
   loadThread,
   trashEmail, archiveEmail, starEmail,
+  spamEmail, markRead, markUnread,
   searchAllAccounts, batchAction,
-  clearSelection, toggleSelectId, selectAllVisible,
+  clearSelection, toggleSelectId, selectRange, selectAllVisible,
+  focusedKey,
+  reopenDraft,
   snoozeEmail, getSnoozeOptions,
   navigatePrev, navigateNext, onSelectEmail,
   // Other
@@ -217,6 +220,7 @@ const MailModule = ({
         filteredEmails.map((email, idx) => {
           const ekey = emailKey(email);
           const isActive = sameMailItem(selectedEmail, email);
+          const isFocused = focusedKey && ekey === focusedKey && !isActive;
           const isSelected = selectedIds.has(ekey);
           const accountId = email.accountId || email.source?.account_id;
           const accountIndex = connectedAccounts.findIndex(a => a.id === accountId);
@@ -234,10 +238,15 @@ const MailModule = ({
           const acct = connectedAccounts[accountIndex];
 
           return (
-            <div key={`${ekey}:${cascadeKey}`} className={`email-item${isActive ? ' active' : ''}${!email.isRead ? ' unread' : ''}${cc}`}
+            <div key={`${ekey}:${cascadeKey}`} className={`email-item${isActive ? ' active' : ''}${isFocused ? ' focused' : ''}${!email.isRead ? ' unread' : ''}${cc}`}
               onMouseEnter={() => handleHoverEnter(email)}
               onMouseLeave={handleHoverLeave}
-              onClick={() => { if (editMode) { toggleSelectId(email); return; } onSelectEmail(email); }}
+              onClick={(e) => {
+                // Shift-click extends the selection range; plain click opens.
+                if (e.shiftKey) { e.preventDefault(); selectRange(email); return; }
+                if (activeCategory === 'drafts' && reopenDraft) { reopenDraft(email); return; }
+                onSelectEmail(email);
+              }}
               onTouchStart={(e) => { const t = e.touches[0]; swipeRef.current = { startX: t.clientX, startY: t.clientY, currentX: t.clientX, emailId: ekey }; e.currentTarget.dataset.swipe = ''; }}
               onTouchMove={(e) => { if (swipeRef.current.emailId === ekey) { swipeRef.current.currentX = e.touches[0].clientX; const d = e.touches[0].clientX - swipeRef.current.startX; if (d < -15) e.currentTarget.dataset.swipe = 'left'; else if (d > 15) e.currentTarget.dataset.swipe = 'right'; else e.currentTarget.dataset.swipe = ''; } }}
               onTouchEnd={(e) => {
@@ -305,10 +314,11 @@ const MailModule = ({
                     email={email}
                     archiveEmail={archiveEmail}
                     trashEmail={trashEmail}
+                    spamEmail={spamEmail}
+                    markRead={markRead}
+                    markUnread={markUnread}
                     setSnoozeDropdownEmailId={setSnoozeDropdownEmailId}
-                    setEmails={setEmails}
                     formatTime={formatTime}
-                    API_BASE={API_BASE}
                   />
                 </div>
               )}
@@ -343,6 +353,11 @@ const MailModule = ({
     const emailIdx = filteredEmails.findIndex(e => sameMailItem(e, email));
     const emailCount = filteredEmails.length;
     const isFullPage = opts.fullPage;
+    // Source-account identity: the opened message must always show which
+    // connected account it belongs to (invariant 1), matching the list chip.
+    const readerAcctIdx = connectedAccounts.findIndex(a => a.id === email.accountId);
+    const readerAcct = readerAcctIdx !== -1 ? connectedAccounts[readerAcctIdx] : null;
+    const readerGrad = readerAcctIdx !== -1 ? getAccountGradient(readerAcctIdx) : null;
 
     return (
       <div className="reader-root" key={readerKey} onScroll={handleReaderScroll} ref={readerScrollRef}>
@@ -351,6 +366,10 @@ const MailModule = ({
             {isFullPage && (<button className="reader-toolbar-btn" onClick={goBackToList} title="Back to inbox" aria-label="Back to inbox"><ArrowLeft size={16} strokeWidth={1.5} /></button>)}
             <button className="reader-toolbar-btn" onClick={() => archiveEmail(email)} title="Archive" aria-label="Archive email"><Archive size={16} strokeWidth={1.5} /></button>
             <button className="reader-toolbar-btn danger" onClick={() => trashEmail(email)} title="Delete" aria-label="Delete email"><Trash2 size={16} strokeWidth={1.5} /></button>
+            {spamEmail && <button className="reader-toolbar-btn" onClick={() => spamEmail(email)} title="Report spam" aria-label="Report spam"><ShieldAlert size={16} strokeWidth={1.5} /></button>}
+            <button className="reader-toolbar-btn" onClick={() => (email.isRead ? markUnread : markRead)?.(email)} title={email.isRead ? 'Mark as unread' : 'Mark as read'} aria-label={email.isRead ? 'Mark as unread' : 'Mark as read'}>
+              {email.isRead ? <Mail size={16} strokeWidth={1.5} /> : <MailOpen size={16} strokeWidth={1.5} />}
+            </button>
             <div style={{ position: 'relative' }}>
               <button className="reader-toolbar-btn" onClick={() => setSnoozeDropdownEmailId(prev => prev === readerKey ? null : readerKey)} title="Snooze" aria-label="Snooze email" aria-expanded={snoozeDropdownEmailId === readerKey} aria-haspopup="true"><Clock size={16} strokeWidth={1.5} /></button>
               {snoozeDropdownEmailId === readerKey && (
@@ -363,7 +382,6 @@ const MailModule = ({
                 </div>
               )}
             </div>
-            <button className="reader-toolbar-btn" title="More actions" aria-label="More actions" aria-haspopup="true"><MoreHorizontal size={16} strokeWidth={1.5} /></button>
           </div>
           <div className="reader-toolbar-right">
             <button className="reader-toolbar-btn" onClick={navigatePrev} disabled={emailIdx <= 0} title="Previous email" aria-label="Previous email"><ChevronLeft size={16} strokeWidth={1.5} /></button>
@@ -372,6 +390,13 @@ const MailModule = ({
           </div>
         </div>
         <div className={`reader-content${readerCompact ? ' reader--compact' : ''}`}>
+          {readerAcct && (
+            <div className="reader-account-chip" title={readerAcct.gmail_email}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginBottom: 12, padding: '3px 10px 3px 8px', borderRadius: 'var(--r-pill)', background: readerGrad ? readerGrad.midRgba(0.1) : 'var(--bg-3)', fontSize: 11, fontWeight: 500, color: 'var(--text-1)' }}>
+              <span className="account-dot" style={{ background: readerGrad ? readerGrad.gradient : 'var(--text-3)', width: 8, height: 8, borderRadius: 999, display: 'inline-block' }} />
+              {readerAcct.account_name || readerAcct.gmail_email}
+            </div>
+          )}
           <h1 className="reader-subject">{email.subject || '(no subject)'}</h1>
           <div className="reader-meta">
             <Avatar email={getEmailOnly(email.from || '')} name={stripName(email.from || '')} size={40} />
@@ -683,8 +708,10 @@ const MailModule = ({
   return null;
 };
 
-// Small inner component to handle hover state locally without polluting parent
-const HoverActions = ({ email, archiveEmail, trashEmail, setSnoozeDropdownEmailId, setEmails, formatTime, API_BASE }) => {
+// Small inner component to handle hover state locally without polluting parent.
+// All actions route through the canonical operations passed from useEmail so
+// mouse and keyboard paths stay identical and account-scoped.
+const HoverActions = ({ email, archiveEmail, trashEmail, spamEmail, markRead, markUnread, setSnoozeDropdownEmailId, formatTime }) => {
   const [isHovered, setIsHovered] = React.useState(false);
   return (
     <div
@@ -696,11 +723,10 @@ const HoverActions = ({ email, archiveEmail, trashEmail, setSnoozeDropdownEmailI
         <div className="row-hover-actions" onClick={e => e.stopPropagation()}>
           <button className="row-action-btn" onClick={() => archiveEmail(email)} title="Archive"><Archive size={14} strokeWidth={1.5} /></button>
           <button className="row-action-btn danger" onClick={() => trashEmail(email)} title="Delete"><Trash2 size={14} strokeWidth={1.5} /></button>
-          <button className="row-action-btn" onClick={async () => {
-            await fetch(`${API_BASE}/emails/${email.accountId}/${email.id}/read`, { method: 'POST', credentials: 'include' });
-            // Scope to the acted-on account so a colliding id elsewhere isn't marked read.
-            setEmails(p => { const acc = p[email.accountId]; if (!acc) return p; const u = {}; for (const c of Object.keys(acc)) u[c] = (acc[c] || []).map(e2 => e2.id === email.id ? { ...e2, isRead: true } : e2); return { ...p, [email.accountId]: u }; });
-          }} title="Mark read"><MailOpen size={14} strokeWidth={1.5} /></button>
+          {spamEmail && <button className="row-action-btn" onClick={() => spamEmail(email)} title="Report spam"><ShieldAlert size={14} strokeWidth={1.5} /></button>}
+          <button className="row-action-btn" onClick={() => (email.isRead ? markUnread : markRead)?.(email)} title={email.isRead ? 'Mark unread' : 'Mark read'}>
+            {email.isRead ? <Mail size={14} strokeWidth={1.5} /> : <MailOpen size={14} strokeWidth={1.5} />}
+          </button>
           <button className="row-action-btn" onClick={e2 => { e2.stopPropagation(); const k = emailKey(email); setSnoozeDropdownEmailId(prev => prev === k ? null : k); }} title="Snooze"><BellOff size={14} strokeWidth={1.5} /></button>
         </div>
       ) : (

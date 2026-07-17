@@ -26,6 +26,7 @@ const EverythingModule = ({
   cascadeKey,
   emailBodies, emailHeaders,
   openCompose, onSelectEmail,
+  archiveEmail,
   setActiveModule, setActiveView,
   setEmails, setError,
   apiBase,
@@ -103,6 +104,7 @@ const EverythingModule = ({
                 setActiveModule={setActiveModule}
                 setActiveView={setActiveView}
                 onSelectEmail={onSelectEmail}
+                archiveEmail={archiveEmail}
                 setEmails={setEmails}
                 setError={setError}
                 apiBase={apiBase}
@@ -280,9 +282,8 @@ const EverythingEmailReader = ({
   setActiveModule,
   setActiveView,
   onSelectEmail,
-  setEmails,
+  archiveEmail,
   setError,
-  apiBase,
   loadRemoteImages, onShowImages,
 }) => {
   if (!email) return null;
@@ -293,21 +294,12 @@ const EverythingEmailReader = ({
   const grad = accountIndex !== -1 ? getAccountGradient(accountIndex) : null;
   const accountName = connectedAccounts[accountIndex]?.account_name || connectedAccounts[accountIndex]?.gmail_email || '';
 
-  const archive = async () => {
-    const aid = email.accountId || connectedAccounts[0]?.id;
-    if (!aid) return;
-    try {
-      await fetch(`${apiBase}/emails/${aid}/${email.id}/archive`, { method: 'POST', credentials: 'include' });
-      // Scope the optimistic removal to the acted-on account so a colliding id
-      // in another account isn't removed from its list.
-      setEmails(p => {
-        const acc = p[aid]; if (!acc) return p;
-        const u = {};
-        for (const c of Object.keys(acc)) u[c] = (acc[c] || []).filter(e => e.id !== email.id);
-        return { ...p, [aid]: u };
-      });
-      closeSlideOver();
-    } catch (err) { setError && setError('Failed to archive'); }
+  // Use the shared optimistic archive so Everything-view gets the same
+  // deferred-undo semantics (and account scoping) as the Mail view.
+  const archive = () => {
+    if (archiveEmail) archiveEmail(email);
+    else if (setError) setError('Failed to archive');
+    closeSlideOver();
   };
 
   return (

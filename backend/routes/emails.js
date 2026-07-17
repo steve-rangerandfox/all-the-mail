@@ -176,14 +176,19 @@ function extractAttachmentMetadata(payload) {
 }
 
 function buildMimeEmail(to, subject, htmlBody, options = {}) {
-  const { cc, bcc, threadId, attachments = [] } = options;
+  const { cc, bcc, inReplyTo, references, attachments = [] } = options;
 
   // P0.3 — sanitize every value that lands in a header line.
   const safeTo = sanitizeMimeHeaderValue(to);
   const safeSubject = sanitizeMimeHeaderValue(subject);
   const safeCc = sanitizeMimeHeaderValue(cc);
   const safeBcc = sanitizeMimeHeaderValue(bcc);
-  const safeThread = sanitizeMimeHeaderValue(threadId);
+  // Standards-compatible threading headers carry the ORIGINAL message's RFC
+  // Message-ID — never the Gmail threadId (which is not a valid Message-ID).
+  // Gmail-internal threading is handled separately by the send request's
+  // threadId param; these headers make external clients thread correctly.
+  const safeInReplyTo = sanitizeMimeHeaderValue(inReplyTo);
+  const safeReferences = sanitizeMimeHeaderValue(references || inReplyTo);
 
   const boundary = `boundary_${Date.now()}_${Math.random().toString(36).substring(7)}`;
 
@@ -195,9 +200,9 @@ function buildMimeEmail(to, subject, htmlBody, options = {}) {
 
   if (safeCc) headers.push(`Cc: ${safeCc}`);
   if (safeBcc) headers.push(`Bcc: ${safeBcc}`);
-  if (safeThread) {
-    headers.push(`In-Reply-To: ${safeThread}`);
-    headers.push(`References: ${safeThread}`);
+  if (safeInReplyTo) {
+    headers.push(`In-Reply-To: ${safeInReplyTo}`);
+    if (safeReferences) headers.push(`References: ${safeReferences}`);
   }
 
   const styledHtmlBody = `
@@ -372,6 +377,18 @@ router.get('/:accountId', authenticateToken, listLimiter, async (req, res) => {
     // Gmail is rate-limiting individual sub-requests.
     if (emails.length < messages.length) {
       console.warn('[emails.list] partial batch:', messages.length - emails.length, 'failed of', messages.length, 'for account', accountId);
+    }
+
+    // For the drafts folder, resolve each message's Gmail DRAFT id (distinct
+    // from the message id) so the client can reopen a draft into an editable
+    // composer and update/delete the correct draft. Best-effort.
+    if (category === 'drafts' && emails.length) {
+      try {
+        const dl = await gmail.users.drafts.list({ userId: 'me', maxResults: 100 });
+        const map = {};
+        (dl.data.drafts || []).forEach(d => { if (d.message?.id) map[d.message.id] = d.id; });
+        emails.forEach(e => { if (map[e.id]) e.draftId = map[e.id]; });
+      } catch (e) { /* best-effort — reopen still works, just as a new draft */ }
     }
 
     res.json({ emails });
@@ -724,7 +741,7 @@ router.post('/:accountId/send', authenticateToken, sendLimiter, upload.array('at
     const client = await getOAuth2ClientForAccount(accountId, req.userId);
     const gmail = google.gmail({ version: 'v1', auth: client });
 
-    let { to, cc, bcc, subject, body, threadId, draftId } = req.body;
+    let { to, cc, bcc, subject, body, threadId, draftId, originalEmailId } = req.body;
 
     const attachments = [];
     if (req.files && req.files.length > 0) {
@@ -737,7 +754,22 @@ router.post('/:accountId/send', authenticateToken, sendLimiter, upload.array('at
       }
     }
 
-    const raw = buildMimeEmail(to, subject, body, { cc, bcc, threadId, attachments });
+    // Resolve standards-compatible threading headers from the original message's
+    // RFC Message-ID (reply/forward). Best-effort: threading via the Gmail
+    // threadId param below still works if this lookup fails.
+    let inReplyTo = null, references = null;
+    if (originalEmailId) {
+      try {
+        const orig = await gmail.users.messages.get({ userId: 'me', id: originalEmailId, format: 'metadata', metadataHeaders: ['Message-ID', 'References'] });
+        const hdrs = orig.data.payload?.headers || [];
+        const mid = hdrs.find(h => (h.name || '').toLowerCase() === 'message-id')?.value || null;
+        const refs = hdrs.find(h => (h.name || '').toLowerCase() === 'references')?.value || null;
+        inReplyTo = mid;
+        references = [refs, mid].filter(Boolean).join(' ') || null;
+      } catch (e) { /* best-effort threading */ }
+    }
+
+    const raw = buildMimeEmail(to, subject, body, { cc, bcc, attachments, inReplyTo, references });
     const encodedMessage = Buffer.from(raw).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 
     const sendParams = {

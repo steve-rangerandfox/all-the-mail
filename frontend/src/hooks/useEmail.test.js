@@ -216,3 +216,59 @@ describe('useEmail — single-account (non-everything) view normalization', () =
     expect(batchUrls).toHaveLength(1);
   });
 });
+
+describe('useEmail — Gmail-parity actions and selection', () => {
+  test('selectRange selects a contiguous visible range from the anchor', () => {
+    const { result } = setup();
+    // Everything view lists both accounts' DUP messages (A newer, then B).
+    const [first, second] = result.current.filteredEmails;
+    act(() => { result.current.toggleSelectId(first); });   // anchor
+    act(() => { result.current.selectRange(second); });      // extend
+    expect(result.current.selectedIds.has(emailKey(first))).toBe(true);
+    expect(result.current.selectedIds.has(emailKey(second))).toBe(true);
+  });
+
+  test('markUnread is optimistic and scoped to the acted-on account', async () => {
+    const { result } = setup();
+    await act(async () => { await result.current.markUnread(itemA()); });
+    const aRead = result.current.emails[ACCT_A].primary[0].isRead;
+    const bRead = result.current.emails[ACCT_B].primary[0].isRead;
+    expect(aRead).toBe(false);
+    // B holds the SAME provider id (DUP1) but must be untouched.
+    expect(bRead).toBe(false); // B started unread; ensure it did not get flipped to read
+    expect(global.fetch.mock.calls.some(c => String(c[0]).includes(`/emails/${ACCT_A}/${DUP}/unread`))).toBe(true);
+    expect(global.fetch.mock.calls.some(c => String(c[0]).includes(`/emails/${ACCT_B}/`))).toBe(false);
+  });
+
+  test('markRead flips only the acted-on account', async () => {
+    const { result } = setup();
+    await act(async () => { await result.current.markRead(itemB()); });
+    expect(result.current.emails[ACCT_B].primary[0].isRead).toBe(true);
+    expect(result.current.emails[ACCT_A].primary[0].isRead).toBe(false);
+    expect(global.fetch.mock.calls.some(c => String(c[0]).includes(`/emails/${ACCT_B}/${DUP}/read`))).toBe(true);
+  });
+
+  test('spamEmail removes only the acted-on account and its executeFn hits /labels', async () => {
+    const { result, props } = setup();
+    act(() => { result.current.spamEmail(itemA()); });
+    // Optimistically removed from A, B's colliding-id message survives.
+    expect(result.current.emails[ACCT_A].primary.some(e => e.id === DUP)).toBe(false);
+    expect(result.current.emails[ACCT_B].primary.some(e => e.id === DUP)).toBe(true);
+    const toastArg = props.setSuccessToast.mock.calls.at(-1)[0];
+    expect(toastArg.message).toMatch(/spam/i);
+    global.fetch.mockClear();
+    await act(async () => { await toastArg.executeFn(); });
+    expect(global.fetch.mock.calls.some(c => String(c[0]).includes(`/emails/${ACCT_A}/${DUP}/labels`))).toBe(true);
+  });
+
+  test('batchAction with a stale (no-longer-visible) selection is a silent no-op', () => {
+    const { result, props } = setup();
+    act(() => { result.current.toggleSelectId(itemA()); });
+    // Message leaves the visible set (e.g. folder changed) before the action.
+    act(() => { result.current.setEmails({}); });
+    props.setSuccessToast.mockClear();
+    act(() => { result.current.batchAction('archive'); });
+    // No success toast for an operation that touched nothing.
+    expect(props.setSuccessToast).not.toHaveBeenCalled();
+  });
+});

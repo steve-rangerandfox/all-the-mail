@@ -1164,6 +1164,13 @@ body {
   background: var(--signal, #FF3A1D);
   pointer-events: none;
 }
+/* Keyboard cursor/focus — distinct from both hover and the opened (.active)
+   row. A subtle inset ring shows where j/k/arrow navigation currently sits
+   WITHOUT implying the message is open or read. */
+.email-item.focused {
+  background: var(--hover-bg);
+  box-shadow: inset 0 0 0 1px var(--line, rgba(0,0,0,0.12));
+}
 
 /* Unread vs read distinction. Read rows fade slightly so unread rows
    read as the actionable items in the list. The left-edge color marker

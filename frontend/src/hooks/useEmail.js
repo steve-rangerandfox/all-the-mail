@@ -217,7 +217,9 @@ export function useEmail({
     // account's body satisfy another account's colliding id (and short-circuit
     // the account-aware IDB read below).
     const key = mailKey(aid, eid);
-    if (emailBodiesRef.current[key] && emailHeadersRef.current[key]) return;
+    if (emailBodiesRef.current[key] && emailHeadersRef.current[key]) {
+      return { body: emailBodiesRef.current[key], headers: emailHeadersRef.current[key] };
+    }
 
     // Stale-while-revalidate: if we have a persisted copy, render it
     // instantly so the reader pane never blanks. The network refresh
@@ -257,6 +259,7 @@ export function useEmail({
           });
           fetch(`${API_BASE}/emails/${aid}/${eid}/read`, { method: 'POST', credentials: 'include' }).catch(() => {});
         }
+        return { body: d.body, headers: d.headers, attachments: d.attachments };
       } else if (r.status === 401) {
         setIsAuthed(false);
         setEmails({});
@@ -412,12 +415,28 @@ export function useEmail({
     return c;
   }, [emails, connectedAccounts]);
 
-  const clearSelection = useCallback(() => setSelectedIds(new Set()), []);
+  const lastSelectedKeyRef = useRef(null);
+  const clearSelection = useCallback(() => { lastSelectedKeyRef.current = null; setSelectedIds(new Set()); }, []);
   // selectedIds holds composite (account, id) keys so selecting a message in
   // one account never selects a colliding-id message in another. Callers pass
   // the full email object; the mutation target is later rebuilt from each
   // item's own fields (never by parsing the key).
-  const toggleSelectId = useCallback((email) => { const k = emailKey(email); setSelectedIds(p => { const n = new Set(p); if (n.has(k)) n.delete(k); else n.add(k); return n; }); }, []);
+  const toggleSelectId = useCallback((email) => { const k = emailKey(email); lastSelectedKeyRef.current = k; setSelectedIds(p => { const n = new Set(p); if (n.has(k)) n.delete(k); else n.add(k); return n; }); }, []);
+  // Shift/range selection: select every visible row between the last-toggled
+  // anchor and the clicked row (inclusive). Falls back to a plain toggle when
+  // there is no anchor yet. Operates purely on filteredEmails (the visible set)
+  // so a range can never reach hidden or other-account messages implicitly.
+  const selectRange = useCallback((email) => {
+    const k = emailKey(email);
+    const anchor = lastSelectedKeyRef.current;
+    if (!anchor) { lastSelectedKeyRef.current = k; setSelectedIds(p => { const n = new Set(p); n.add(k); return n; }); return; }
+    const keys = filteredEmails.map(e => emailKey(e));
+    const i = keys.indexOf(anchor), j = keys.indexOf(k);
+    if (i === -1 || j === -1) { lastSelectedKeyRef.current = k; setSelectedIds(p => { const n = new Set(p); n.add(k); return n; }); return; }
+    const [lo, hi] = i <= j ? [i, j] : [j, i];
+    setSelectedIds(p => { const n = new Set(p); for (let x = lo; x <= hi; x++) n.add(keys[x]); return n; });
+    lastSelectedKeyRef.current = k;
+  }, [filteredEmails]);
   const selectAllVisible = useCallback(() => { setSelectedIds(() => new Set(filteredEmails.map(e => emailKey(e)))); }, [filteredEmails]);
 
   const groupSelectedByAccount = useCallback(() => {
@@ -477,6 +496,49 @@ export function useEmail({
     setSuccessToast({ message: 'Email archived', undoFn, executeFn });
   }, [selectedEmail, removeEmailIds, emails, setError, setSuccessToast, setShowMetadata, setFullPageReaderOpen, connectedAccounts]);
 
+  // Report spam — same optimistic-remove + deferred-undo shape as archive, but
+  // the provider call moves the message to SPAM (removing INBOX). Account-scoped.
+  const spamEmail = useCallback((email) => {
+    if (!email?.id || !email?.accountId) return;
+    const snapshot = { ...emails };
+    removeEmailIds(email.accountId, [email.id]);
+    if (sameMailItem(selectedEmail, email)) {
+      setSelectedEmail(null); setSelectedThread(null); setSelectedThreadActiveMessageId(null);
+      if (setShowMetadata) setShowMetadata(false);
+      if (setFullPageReaderOpen) setFullPageReaderOpen(false);
+    }
+    const executeFn = async () => {
+      try {
+        const r = await fetch(`${API_BASE}/emails/${email.accountId}/${email.id}/labels`, {
+          method: 'POST', credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ addLabelIds: ['SPAM'], removeLabelIds: ['INBOX'] }),
+        });
+        const account = connectedAccounts.find(a => a.id === email.accountId);
+        if (await maybeHandleApiError(r, account)) { setEmails(snapshot); return; }
+        if (!r.ok) { setEmails(snapshot); setError('Failed to report spam'); }
+      } catch (err) { setEmails(snapshot); setError('Failed to report spam'); }
+    };
+    const undoFn = () => { setEmails(snapshot); setSuccessToast(null); };
+    setSuccessToast({ message: 'Reported spam', undoFn, executeFn });
+  }, [selectedEmail, removeEmailIds, emails, setError, setSuccessToast, setShowMetadata, setFullPageReaderOpen, connectedAccounts]);
+
+  // Mark read / unread. Instant (no undo). Optimistically scoped to the
+  // acted-on account so a colliding id elsewhere is never flipped.
+  const setReadState = useCallback(async (email, read) => {
+    if (!email?.id || !email?.accountId) return;
+    const aid = email.accountId, eid = email.id;
+    setEmails(p => { const acc = p[aid]; if (!acc) return p; const u = {}; for (const c of Object.keys(acc)) u[c] = (acc[c] || []).map(e => e.id === eid ? { ...e, isRead: read } : e); return { ...p, [aid]: u }; });
+    try {
+      const r = await fetch(`${API_BASE}/emails/${aid}/${eid}/${read ? 'read' : 'unread'}`, { method: 'POST', credentials: 'include' });
+      const account = connectedAccounts.find(a => a.id === aid);
+      if (await maybeHandleApiError(r, account)) return;
+      if (!r.ok) { setEmails(p => { const acc = p[aid]; if (!acc) return p; const u = {}; for (const c of Object.keys(acc)) u[c] = (acc[c] || []).map(e => e.id === eid ? { ...e, isRead: !read } : e); return { ...p, [aid]: u }; }); }
+    } catch (err) { /* revert on failure */ setEmails(p => { const acc = p[aid]; if (!acc) return p; const u = {}; for (const c of Object.keys(acc)) u[c] = (acc[c] || []).map(e => e.id === eid ? { ...e, isRead: !read } : e); return { ...p, [aid]: u }; }); }
+  }, [connectedAccounts]);
+  const markRead = useCallback((email) => setReadState(email, true), [setReadState]);
+  const markUnread = useCallback((email) => setReadState(email, false), [setReadState]);
+
   const starEmail = useCallback(async (email) => {
     if (!email?.id || !email?.accountId) return;
     // Composite key so a star toggle stays on the acted-on account's message.
@@ -529,7 +591,14 @@ export function useEmail({
     if (selectedIds.size === 0) return;
     const snapshot = { ...emails };
     const byAccount = groupSelectedByAccount();
-    const affectedIds = new Set(selectedIds);
+    // Count only messages that are actually present in the visible set. A stale
+    // selection (e.g. left over from another folder) must never report success
+    // for an operation that touched nothing.
+    const affectedCount = [...byAccount.values()].reduce((n, ids) => n + ids.length, 0);
+    if (affectedCount === 0) { clearSelection(); setEditMode(false); return; }
+    // Rebuild the affected key set from what's actually being removed.
+    const affectedIds = new Set();
+    for (const e of filteredEmails) { if (selectedIds.has(emailKey(e)) && e.accountId && byAccount.has(e.accountId)) affectedIds.add(emailKey(e)); }
     byAccount.forEach((ids, aid) => removeEmailIds(aid, ids));
     if (selectedEmail && affectedIds.has(emailKey(selectedEmail))) {
       setSelectedEmail(null); setSelectedThread(null); setSelectedThreadActiveMessageId(null);
@@ -537,7 +606,7 @@ export function useEmail({
       if (setFullPageReaderOpen) setFullPageReaderOpen(false);
     }
     clearSelection(); setEditMode(false);
-    const label = action === 'archive' ? `Archived ${affectedIds.size} message${affectedIds.size !== 1 ? 's' : ''}` : `Deleted ${affectedIds.size} message${affectedIds.size !== 1 ? 's' : ''}`;
+    const label = action === 'archive' ? `Archived ${affectedCount} message${affectedCount !== 1 ? 's' : ''}` : `Deleted ${affectedCount} message${affectedCount !== 1 ? 's' : ''}`;
     const executeFn = async () => {
       setBatchWorking(true);
       try {
@@ -550,7 +619,7 @@ export function useEmail({
     };
     const undoFn = () => { setEmails(snapshot); setSuccessToast(null); };
     setSuccessToast({ message: label, undoFn, executeFn });
-  }, [selectedIds, emails, groupSelectedByAccount, removeEmailIds, selectedEmail, clearSelection, setError, setSuccessToast, setShowMetadata, setFullPageReaderOpen]);
+  }, [selectedIds, emails, groupSelectedByAccount, removeEmailIds, selectedEmail, clearSelection, setError, setSuccessToast, setShowMetadata, setFullPageReaderOpen, filteredEmails]);
 
   const snoozeEmail = useCallback((email, until) => {
     if (!email?.id) return;
@@ -716,8 +785,9 @@ export function useEmail({
     filteredEmails, allEmails, categoryCounts,
     loadEmailsForAccount, loadEmailDetails, downloadAttachment, loadThread,
     getCurrentEmails, trashEmail, archiveEmail, starEmail,
+    spamEmail, markRead, markUnread,
     searchAllAccounts, batchAction,
-    clearSelection, toggleSelectId, selectAllVisible,
+    clearSelection, toggleSelectId, selectRange, selectAllVisible,
     snoozeEmail, getSnoozeOptions, syncSnoozed,
     navigatePrev, navigateNext, onSelectEmail,
     setEmails, setEmailBodies, setEmailHeaders, setEmailAttachments,

@@ -1,5 +1,5 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
-import { X, Minus, Maximize2, Paperclip, Clock, Image as ImageIcon, MoreHorizontal } from 'lucide-react';
+import { X, Minus, Maximize2, Paperclip, Clock, Image as ImageIcon, MoreHorizontal, Trash2 } from 'lucide-react';
 import ReactQuill from 'react-quill';
 import 'react-quill/dist/quill.snow.css';
 import RecipientAutocomplete from './RecipientAutocomplete';
@@ -24,18 +24,22 @@ function DraftStatus({ state, lastSavedAt }) {
 
   if (state === 'idle' && !lastSavedAt) return null;
 
-  let label;
+  let label, isError = false;
   if (state === 'saving') {
     label = 'Saving…';
-  } else if (lastSavedAt) {
-    const ageS = Math.max(0, Math.round((Date.now() - lastSavedAt) / 1000));
+  } else if (state === 'failed') {
+    // Truthful indicator (invariant 4): never show "Saved" for a failed save.
+    label = 'Couldn’t save';
+    isError = true;
+  } else if (state === 'saved' || lastSavedAt) {
+    const ageS = lastSavedAt ? Math.max(0, Math.round((Date.now() - lastSavedAt) / 1000)) : 0;
     if (ageS < 5) label = 'Saved';
     else if (ageS < 60) label = `Saved ${ageS}s ago`;
     else label = `Saved ${Math.round(ageS / 60)}m ago`;
   } else return null;
 
   return (
-    <span style={{ fontSize: 11, color: 'var(--text-3)', userSelect: 'none' }}>
+    <span style={{ fontSize: 11, color: isError ? 'var(--danger)' : 'var(--text-3)', userSelect: 'none' }}>
       {label}
     </span>
   );
@@ -61,6 +65,7 @@ const ComposeModal = ({
   draftSavingState = 'idle',
   draftLastSavedAt = null,
   closeCompose, sendCompose,
+  discardCompose,
   scheduleSend,
   saveDraft,
   includeSignature, setIncludeSignature,
@@ -82,6 +87,8 @@ const ComposeModal = ({
     return () => document.removeEventListener('mousedown', onDown);
   }, [moreMenuOpen]);
   const [confirmingEmptySubject, setConfirmingEmptySubject] = useState(false);
+  const [confirmingDiscard, setConfirmingDiscard] = useState(false);
+  const [confirmingClose, setConfirmingClose] = useState(false);
   const [toError, setToError] = useState(false);
   const fileInputRef = useRef(null);
   const imageInputRef = useRef(null);
@@ -236,6 +243,13 @@ const ComposeModal = ({
     sendCompose();
   };
 
+  // Meaningful-content check for the discard confirmation gate.
+  const bodyText = (composeBody || '').replace(/<[^>]+>/g, '').replace(/&nbsp;/gi, ' ').trim();
+  const hasContent = !!(composeTo.trim() || composeCc.trim() || composeBcc.trim() || composeSubject.trim() || composeAttachments.length || bodyText);
+  // Close saves the draft, but session-only attachments would be lost — warn.
+  const handleCloseClick = () => { if (composeAttachments.length > 0) { setConfirmingClose(true); return; } closeCompose(); };
+  const handleDiscardClick = () => { if (hasContent) { setConfirmingDiscard(true); return; } discardCompose?.(); };
+
   const title = composeMode === 'compose' ? 'New Message'
     : composeMode === 'reply' ? 'Reply'
     : composeMode === 'replyAll' ? 'Reply All'
@@ -265,7 +279,12 @@ const ComposeModal = ({
           >
             {isMinimized ? <Maximize2 size={13} strokeWidth={1.5} /> : <Minus size={13} strokeWidth={1.5} />}
           </button>
-          <button className="docked-compose-ctrl" title="Close" onClick={closeCompose}>
+          {discardCompose && (
+            <button className="docked-compose-ctrl" title="Discard draft" aria-label="Discard draft" onClick={handleDiscardClick}>
+              <Trash2 size={13} strokeWidth={1.5} />
+            </button>
+          )}
+          <button className="docked-compose-ctrl" title="Close" onClick={handleCloseClick}>
             <X size={13} strokeWidth={1.5} />
           </button>
         </div>
@@ -382,9 +401,14 @@ const ComposeModal = ({
                 <div key={idx} className="docked-attachment-chip">
                   <Paperclip size={11} strokeWidth={1.5} />
                   <span>{file.name}</span>
-                  <button onClick={() => removeAttachment(idx)}><X size={11} /></button>
+                  <button onClick={() => removeAttachment(idx)} title="Remove attachment" aria-label={`Remove ${file.name}`}><X size={11} /></button>
                 </div>
               ))}
+              {/* Truthfulness: attachments ride with Send but are not stored in
+                  the saved draft (no server-side draft attachment storage). */}
+              <div style={{ width: '100%', fontSize: 10, color: 'var(--text-3)', marginTop: 2 }}>
+                Attachments are sent with this message but aren’t saved with drafts.
+              </div>
             </div>
           )}
 
@@ -400,6 +424,20 @@ const ComposeModal = ({
               <span>Send without subject?</span>
               <button className="btn-ghost" style={{ fontSize: 11 }} onClick={() => setConfirmingEmptySubject(false)}>Cancel</button>
               <button className="btn btn-primary" style={{ fontSize: 11 }} onClick={() => { setConfirmingEmptySubject(false); sendCompose(); }}>Send</button>
+            </div>
+          )}
+          {confirmingDiscard && (
+            <div className="docked-error">
+              <span>Discard this draft? This can’t be undone.</span>
+              <button className="btn-ghost" style={{ fontSize: 11 }} onClick={() => setConfirmingDiscard(false)}>Cancel</button>
+              <button className="btn btn-primary danger" style={{ fontSize: 11 }} onClick={() => { setConfirmingDiscard(false); discardCompose?.(); }}>Discard</button>
+            </div>
+          )}
+          {confirmingClose && (
+            <div className="docked-error">
+              <span>{composeAttachments.length} attachment{composeAttachments.length !== 1 ? 's' : ''} won’t be saved with the draft. Close anyway?</span>
+              <button className="btn-ghost" style={{ fontSize: 11 }} onClick={() => setConfirmingClose(false)}>Cancel</button>
+              <button className="btn btn-primary" style={{ fontSize: 11 }} onClick={() => { setConfirmingClose(false); closeCompose(); }}>Close</button>
             </div>
           )}
 

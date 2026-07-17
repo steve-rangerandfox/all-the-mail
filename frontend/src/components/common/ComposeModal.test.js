@@ -113,17 +113,55 @@ describe('ComposeModal', () => {
     expect(screen.queryByPlaceholderText('Cc')).not.toBeInTheDocument();
   });
 
-  it('calls sendCompose when Send is clicked with subject', () => {
-    renderModal({ composeSubject: 'Test subject' });
+  it('calls sendCompose when Send is clicked with a recipient and subject', () => {
+    renderModal({ composeSubject: 'Test subject', composeTo: 'a@b.com' });
     fireEvent.click(screen.getByText('Send'));
     expect(defaultProps.sendCompose).toHaveBeenCalled();
   });
 
   it('shows empty subject confirmation instead of sending', () => {
-    renderModal({ composeSubject: '' });
+    renderModal({ composeSubject: '', composeTo: 'a@b.com' });
     fireEvent.click(screen.getByText('Send'));
     expect(screen.getByText('Send without subject?')).toBeInTheDocument();
     expect(defaultProps.sendCompose).not.toHaveBeenCalled();
+  });
+
+  it('blocks Send with no recipient (does not call sendCompose)', () => {
+    renderModal({ composeSubject: 'Has subject', composeTo: '' });
+    fireEvent.click(screen.getByText('Send'));
+    expect(defaultProps.sendCompose).not.toHaveBeenCalled();
+  });
+
+  it('shows a truthful "Couldn’t save" indicator on save failure', () => {
+    renderModal({ draftSavingState: 'failed' });
+    expect(screen.getByText('Couldn’t save')).toBeInTheDocument();
+  });
+
+  it('renders a discard control and confirms before discarding meaningful content', () => {
+    const discardCompose = jest.fn();
+    renderModal({ discardCompose, composeSubject: 'Draft in progress' });
+    fireEvent.click(screen.getByLabelText('Discard draft'));
+    // Confirmation gate — not discarded yet.
+    expect(discardCompose).not.toHaveBeenCalled();
+    expect(screen.getByText(/Discard this draft/)).toBeInTheDocument();
+    fireEvent.click(screen.getByText('Discard'));
+    expect(discardCompose).toHaveBeenCalled();
+  });
+
+  it('warns that attachments are not saved before closing with attachments', () => {
+    const closeCompose = jest.fn();
+    renderModal({ closeCompose, composeAttachments: [{ name: 'a.pdf' }] });
+    fireEvent.click(screen.getByTitle('Close'));
+    // Close is gated behind the attachment-loss warning.
+    expect(closeCompose).not.toHaveBeenCalled();
+    expect(screen.getByText(/won’t be saved with the draft/)).toBeInTheDocument();
+    fireEvent.click(screen.getByText('Close'));
+    expect(closeCompose).toHaveBeenCalled();
+  });
+
+  it('states that attachments are not saved with drafts', () => {
+    renderModal({ composeAttachments: [{ name: 'a.pdf' }] });
+    expect(screen.getByText(/aren’t saved with drafts/)).toBeInTheDocument();
   });
 
   it('calls closeCompose when X button is clicked', () => {

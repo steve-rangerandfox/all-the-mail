@@ -7,8 +7,8 @@ import {
 import { Group as PanelGroup } from 'react-resizable-panels';
 import { API_BASE, FILE_TYPES } from './utils/constants';
 import {
-  getAccountGradient, buildEmailSrcDoc, emailHtmlHasRemoteImages, stripName, ensurePrefix,
-  getEmailOnly, splitList, uniqLower, migrateLayoutStorage,
+  getAccountGradient, buildEmailSrcDoc, emailHtmlHasRemoteImages, stripName,
+  migrateLayoutStorage,
   formatRelativeEdit, getShortLabel,
   getDocEditUrl, getDocIcon, getDocEditorLabel, getRelativeTime, formatTime,
   parseEventStart,
@@ -16,6 +16,9 @@ import {
 import { attributionPayload } from './utils/attribution';
 import { maybeHandleApiError } from './utils/apiErrors';
 import { emailKey, sameMailItem } from './utils/mailIdentity';
+import { buildComposerSession, blankComposerSession, composerHasContent, recomputeForFrom } from './utils/composerSession';
+import { createUndoQueue } from './utils/undoQueue';
+import { validateFiles } from './utils/attachments';
 import * as analytics from './utils/analytics';
 import { useSignatures } from './hooks/useSignatures';
 
@@ -109,6 +112,10 @@ const AllTheMail = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [showMetadata, setShowMetadata] = useState(false);
   const [readerCompact, setReaderCompact] = useState(false);
+  // Keyboard cursor/focus — a distinct state from the opened message
+  // (selectedEmail) and the checkbox selection (selectedIds). j/k and arrows
+  // move this cursor; it does NOT open a message or mark it read on its own.
+  const [focusedKey, setFocusedKey] = useState(null);
 
   const [composeOpen, setComposeOpen] = useState(false);
   const [composeMode, setComposeMode] = useState('compose');
@@ -159,7 +166,22 @@ const AllTheMail = () => {
   });
 
   const [error, setError] = useState(null);
-  const [successToast, setSuccessToast] = useState(null); // { message, undoFn? }
+  const [successToast, setSuccessToast] = useState(null); // { message, undoFn?, executeFn? }
+
+  // Undo queue for optimistic mail actions. Guarantees every deferred provider
+  // call runs unless explicitly undone: scheduling a new action flushes the
+  // previous one to the provider first (see utils/undoQueue.js).
+  const undoQueueRef = useRef(null);
+  if (!undoQueueRef.current) undoQueueRef.current = createUndoQueue({ delay: 5000 });
+  // Canonical toast emitter. Non-undo toasts just show; undo toasts also
+  // schedule their deferred provider call on the queue and clear when it fires.
+  const emitToast = useCallback((payload) => {
+    if (!payload) { undoQueueRef.current.cancel(); setSuccessToast(null); return; }
+    setSuccessToast(payload);
+    if (payload.executeFn) {
+      undoQueueRef.current.schedule(payload.executeFn, () => setSuccessToast(cur => (cur === payload ? null : cur)));
+    }
+  }, []);
   // Forced onboarding: shown when user is authed, has at least one
   // connected account, and has not yet completed (or abandoned) the
   // onboarding flow. The atm_onboarding_completed key is set by
@@ -209,6 +231,9 @@ const AllTheMail = () => {
   const searchInputRef = useRef(null);
   const draftSaveTimeoutRef = useRef(null);
   const saveDraftRef = useRef(null);
+  // Holds the current composer session's baseline (initial body) + reply context
+  // for content-change detection and From-switch recompute. See composerSession.
+  const composerSessionRef = useRef(blankComposerSession());
   const pollingIntervalRef = useRef(null);
   const cascadeTimestampRef = useRef(Date.now());
   const hasAnimatedRef = useRef(false);
@@ -270,17 +295,13 @@ const AllTheMail = () => {
   useEffect(() => { document.documentElement.setAttribute('data-theme', theme); localStorage.setItem('atm-theme', theme); }, [theme]);
   const toggleTheme = useCallback(() => setTheme(t => t === 'dark' ? 'light' : 'dark'), []);
 
-  const undoTimerRef = useRef(null);
+  // Plain (non-undo) toasts auto-dismiss. Undo toasts (executeFn present) are
+  // owned by the undo queue, which clears them when the deferred action fires.
   useEffect(() => {
-    if (!successToast) return;
-    if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+    if (!successToast || successToast.executeFn || successToast.persist) return;
     const delay = successToast.undoFn ? 5000 : 3000;
-    undoTimerRef.current = setTimeout(() => {
-      // If there's a pending action, execute it now
-      if (successToast.executeFn) successToast.executeFn();
-      setSuccessToast(null);
-    }, delay);
-    return () => { if (undoTimerRef.current) clearTimeout(undoTimerRef.current); };
+    const t = setTimeout(() => setSuccessToast(cur => (cur === successToast ? null : cur)), delay);
+    return () => clearTimeout(t);
   }, [successToast]);
 
   useEffect(() => {
@@ -409,8 +430,9 @@ const AllTheMail = () => {
     downloadAttachment,
     loadThread,
     trashEmail, archiveEmail, starEmail,
+    spamEmail, markRead, markUnread,
     searchAllAccounts, batchAction,
-    clearSelection, toggleSelectId, selectAllVisible,
+    clearSelection, toggleSelectId, selectRange, selectAllVisible,
     snoozeEmail, getSnoozeOptions, syncSnoozed,
     navigatePrev, navigateNext, onSelectEmail,
   } = useEmail({
@@ -420,7 +442,7 @@ const AllTheMail = () => {
     searchQuery,
     conversationView,
     sendDelaySeconds,
-    setSuccessToast,
+    setSuccessToast: emitToast,
     setError,
     setIsAuthed,
     handleLogout,
@@ -932,7 +954,17 @@ const AllTheMail = () => {
     prevAccountCountRef.current = curr;
   }, [connectedAccounts.length]);
 
-  const handleFileSelect = useCallback((e)=>{setComposeAttachments(p=>[...p,...Array.from(e.target.files||[])]);}, []);
+  const handleFileSelect = useCallback((e)=>{
+    const picked = Array.from(e.target.files || []);
+    setComposeAttachments(prev => {
+      const { accepted, rejected } = validateFiles(picked, prev);
+      if (rejected.length) setComposeError(rejected.map(r => r.error).join(' · '));
+      else setComposeError(null);
+      return accepted.length ? [...prev, ...accepted] : prev;
+    });
+    // allow re-picking the same file
+    if (e.target) e.target.value = '';
+  }, []);
   const removeAttachment = useCallback((i)=>{setComposeAttachments(p=>p.filter((_,j)=>j!==i));}, []);
 
   useEffect(()=>{loadAccounts();}, [loadAccounts]);
@@ -1224,11 +1256,15 @@ const AllTheMail = () => {
       if (saveDraftRef.current) {
         setDraftSavingState('saving');
         Promise.resolve(saveDraftRef.current())
-          .then(() => {
-            setDraftSavingState('saved');
-            setDraftLastSavedAt(Date.now());
+          .then((res) => {
+            const status = res?.status || 'failed';
+            // Truthful indicator (invariant 4): only report Saved on a real
+            // success; a non-OK / network / malformed result shows Couldn't save.
+            if (status === 'saved') { setDraftSavingState('saved'); setDraftLastSavedAt(Date.now()); }
+            else if (status === 'failed') { setDraftSavingState('failed'); }
+            else { setDraftSavingState('idle'); }
           })
-          .catch(() => setDraftSavingState('idle'));
+          .catch(() => setDraftSavingState('failed'));
       }
     }, delay);
     return () => { if (draftSaveTimeoutRef.current) clearTimeout(draftSaveTimeoutRef.current); };
@@ -1272,26 +1308,31 @@ const AllTheMail = () => {
         const tag = (document.activeElement?.tagName || '').toLowerCase();
         const inInput = tag === 'input' || tag === 'textarea' || tag === 'select' || document.activeElement?.getAttribute?.('contenteditable') === 'true';
         if (!inInput && activeModule === 'mail') {
-          if (e.key === 'j') {
+          const s = shortcutsRef.current;
+          const readerOpen = selectedEmail && (splitMode !== 'none' || fullPageReaderOpen);
+          const focusedEmail = focusedKey ? filteredEmails.find(x => emailKey(x) === focusedKey) : null;
+          const scrollRowIntoView = (idx) => requestAnimationFrame(() => { const row = document.querySelector(`.email-item:nth-child(${idx + 1})`); if (row) row.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); });
+
+          // j/k — move the cursor (or navigate the reader). When no reader is
+          // open this moves focus ONLY: it never opens a message or marks it
+          // read (invariant: cursor movement is not a read).
+          if (e.key === 'j' || e.key === 'k') {
             e.preventDefault();
-            const idx = selectedEmail ? filteredEmails.findIndex(x => sameMailItem(x, selectedEmail)) : -1;
-            const ni = Math.min(idx + 1, filteredEmails.length - 1);
-            if (ni >= 0 && filteredEmails[ni]) { const ne = filteredEmails[ni]; setSelectedEmail(ne); loadEmailDetails(ne); loadThread(ne); }
+            const dir = e.key === 'j' ? 1 : -1;
+            if (readerOpen) { if (dir === 1) navigateNext(); else navigatePrev(); return; }
+            const anchor = focusedKey
+              ? filteredEmails.findIndex(x => emailKey(x) === focusedKey)
+              : (selectedEmail ? filteredEmails.findIndex(x => sameMailItem(x, selectedEmail)) : (dir === 1 ? -1 : filteredEmails.length));
+            const ni = Math.min(Math.max(anchor + dir, 0), filteredEmails.length - 1);
+            if (filteredEmails[ni]) { setFocusedKey(emailKey(filteredEmails[ni])); scrollRowIntoView(ni); }
             return;
           }
-          if (e.key === 'k') {
-            e.preventDefault();
-            const idx = selectedEmail ? filteredEmails.findIndex(x => sameMailItem(x, selectedEmail)) : filteredEmails.length;
-            const ni = Math.max(idx - 1, 0);
-            if (filteredEmails[ni]) { const ne = filteredEmails[ni]; setSelectedEmail(ne); loadEmailDetails(ne); loadThread(ne); }
-            return;
-          }
+          // Enter — open the focused message (intentional view; marks read).
+          if (e.key === 'Enter' && !readerOpen && focusedEmail) { e.preventDefault(); s.onSelectEmail?.(focusedEmail); return; }
           if (e.key === 'u' && selectedEmail) { e.preventDefault(); setSelectedEmail(null); setFullPageReaderOpen(false); return; }
-          if (e.key === 'x' && selectedEmail) { e.preventDefault(); toggleSelectId(selectedEmail); return; }
-          if (e.key === 's' && selectedEmail) { e.preventDefault(); starEmail(selectedEmail); return; }
-          if (e.key === 'a' && selectedEmail) { e.preventDefault(); shortcutsRef.current.openCompose?.('replyAll', selectedEmail); return; }
-          if (e.key === 'f' && selectedEmail) { e.preventDefault(); shortcutsRef.current.openCompose?.('forward', selectedEmail); return; }
-          // Two-key sequences: g+i, g+s, g+d, g+t
+
+          // Two-key sequences (g i / g s / g d / g t) must be checked BEFORE the
+          // single-letter action keys, or a pending 'g' + 's' would star instead.
           if (e.key === 'g') {
             lastKeyRef.current = 'g';
             if (lastKeyTimerRef.current) clearTimeout(lastKeyTimerRef.current);
@@ -1306,6 +1347,16 @@ const AllTheMail = () => {
             if (e.key === 'd') { e.preventDefault(); setActiveCategory('drafts'); return; }
             if (e.key === 't') { e.preventDefault(); setActiveCategory('sent'); return; }
           }
+
+          // Single-key actions operate on the opened message, or the cursor row.
+          const target = selectedEmail || focusedEmail;
+          if (e.key === 'x' && target) { e.preventDefault(); s.toggleSelectId?.(target); return; }
+          if (e.key === 's' && target) { e.preventDefault(); s.starEmail?.(target); return; }
+          if (e.key === '!' && target) { e.preventDefault(); s.spamEmail?.(target); return; }
+          if (e.key === 'I' && target) { e.preventDefault(); s.markRead?.(target); return; }
+          if (e.key === 'U' && target) { e.preventDefault(); s.markUnread?.(target); return; }
+          if (e.key === 'a' && target) { e.preventDefault(); s.openCompose?.('replyAll', target); return; }
+          if (e.key === 'f' && target) { e.preventDefault(); s.openCompose?.('forward', target); return; }
         }
       }
       if(composeOpen) return;
@@ -1351,73 +1402,155 @@ const AllTheMail = () => {
           el.scrollBy({top:e.key==='ArrowDown'?120:-120,behavior:'smooth'});
           return;
         }
-      } else {
-        if(!selectedEmail) return;
+      } else if (activeModule === 'mail') {
+        // No reader open: arrows move the cursor only — no open, no mark-read.
         if(e.key==='ArrowDown'||e.key==='ArrowUp'){
           e.preventDefault();
-          const idx=filteredEmails.findIndex(x=>sameMailItem(x,selectedEmail)); if(idx<0) return;
-          const ni=e.key==='ArrowDown'?idx+1:idx-1; if(ni<0||ni>=filteredEmails.length) return;
-          const ne=filteredEmails[ni]; setSelectedEmail(ne); setShowMetadata(false); loadEmailDetails(ne); loadThread(ne);
-          requestAnimationFrame(()=>{const row=document.querySelector(`.email-item:nth-child(${ni+1})`);if(row)row.scrollIntoView({behavior:'smooth',block:'nearest'});});
+          if (filteredEmails.length === 0) return;
+          const anchor = focusedKey
+            ? filteredEmails.findIndex(x => emailKey(x) === focusedKey)
+            : (selectedEmail ? filteredEmails.findIndex(x => sameMailItem(x, selectedEmail)) : (e.key==='ArrowDown' ? -1 : filteredEmails.length));
+          const ni = Math.min(Math.max(anchor + (e.key==='ArrowDown'?1:-1), 0), filteredEmails.length - 1);
+          if (filteredEmails[ni]) { setFocusedKey(emailKey(filteredEmails[ni])); requestAnimationFrame(()=>{const row=document.querySelector(`.email-item:nth-child(${ni+1})`);if(row)row.scrollIntoView({behavior:'smooth',block:'nearest'});}); }
+          return;
         }
       }
       const s = shortcutsRef.current;
-      if (e.key === 'e' && selectedEmail && s.archiveEmail) { e.preventDefault(); s.archiveEmail(selectedEmail); }
-      if (e.key === '#' && selectedEmail && s.trashEmail) { e.preventDefault(); s.trashEmail(selectedEmail); }
-      if (e.key === 'r' && selectedEmail && s.openCompose) { e.preventDefault(); s.openCompose('reply', selectedEmail); }
+      // Action keys target the opened message, or the cursor row when none open.
+      const kbTarget = selectedEmail || (activeModule === 'mail' && focusedKey ? filteredEmails.find(x => emailKey(x) === focusedKey) : null);
+      if (e.key === 'e' && kbTarget && s.archiveEmail) { e.preventDefault(); s.archiveEmail(kbTarget); }
+      if (e.key === '#' && kbTarget && s.trashEmail) { e.preventDefault(); s.trashEmail(kbTarget); }
+      if (e.key === 'r' && kbTarget && s.openCompose) { e.preventDefault(); s.openCompose('reply', kbTarget); }
       if (e.key === 'c' && !e.metaKey && !e.ctrlKey && s.openCompose) { e.preventDefault(); s.openCompose('compose'); }
       if (e.key === '/' && !e.metaKey) { e.preventDefault(); searchInputRef.current?.focus(); }
     };
     window.addEventListener('keydown',onKey); return ()=>window.removeEventListener('keydown',onKey);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedEmail, filteredEmails, loadEmailDetails, loadThread, composeOpen, splitMode, fullPageReaderOpen, navigatePrev, navigateNext, activeModule, shortcutsOpen, selectedEvent, filteredAllEvents, eventEditOpen, openEventEdit]); // starEmail/toggleSelectId accessed via ref
+  }, [selectedEmail, filteredEmails, focusedKey, loadEmailDetails, loadThread, composeOpen, splitMode, fullPageReaderOpen, navigatePrev, navigateNext, activeModule, shortcutsOpen, selectedEvent, filteredAllEvents, eventEditOpen, openEventEdit]); // action callbacks accessed via shortcutsRef
 
-  const openCompose = useCallback(async (mode, email=null) => {
-    setComposeError(null);setComposeMode(mode);setComposeOriginalEmail(email);setComposeShowCcBcc(false);
-    const defaultFrom=mode==='compose'?(activeView!=='everything'?activeView:connectedAccounts[0]?.id||''):(email?.accountId||connectedAccounts[0]?.id||'');
-    setComposeFromAccountId(defaultFrom);
-    let to='',cc='',bcc='',subject='',body='';
-    if(mode!=='compose'&&email){
-      await loadEmailDetails(email); const h=emailHeaders[emailKey(email)]||{};
-      const oFrom=h.replyTo||h.from||email.from||'',oTo=h.to||'',oCc=h.cc||'',oSubj=h.subject||email.subject||'';
-      if(mode==='reply'){to=getEmailOnly(oFrom);subject=ensurePrefix(oSubj,'Re:');body=`\n\n--- Original message ---\n${stripName(oFrom)}\n${email.snippet||''}\n`;}
-      if(mode==='replyAll'){const me=(connectedAccounts.find(a=>a.id===defaultFrom)?.gmail_email||'').toLowerCase();const tl=uniqLower(splitList(getEmailOnly(oFrom)));const cl=uniqLower([...splitList(oTo),...splitList(oCc)]);const tf=tl.filter(x=>getEmailOnly(x).toLowerCase()!==me);const cf=cl.filter(x=>getEmailOnly(x).toLowerCase()!==me);to=(tf[0]||getEmailOnly(oFrom)).trim();cc=uniqLower([...tf.slice(1),...cf]).join(', ');subject=ensurePrefix(oSubj,'Re:');body=`\n\n--- Original message ---\n${stripName(oFrom)}\n${email.snippet||''}\n`;}
-      if(mode==='forward'){subject=ensurePrefix(oSubj,'Fwd:');body=`\n\n--- Forwarded message ---\nFrom: ${stripName(h.from||email.from||'')}\nDate: ${h.date||new Date(email.date).toLocaleString()}\nSubject: ${h.subject||email.subject||''}\nTo: ${h.to||''}\n${h.cc?`Cc: ${h.cc}\n`:''}\n${email.snippet||''}\n`;}
-    }
-    // Inject the sending account's Gmail signature. For new compose,
-    // signature is appended to the empty body. For reply/forward, it's
-    // appended ABOVE the quoted thread (so the signature sits with the
-    // user's typed message). Skipped if the user has the in-app
-    // includeAtmSignature toggle off, OR if no signature is available
-    // for that account (older accounts without the gmail.settings.basic
-    // scope return ''), OR if Quill's empty-state is the only content.
-    const sig = signatures[defaultFrom] || '';
-    if (sig && includeAtmSignature) {
-      const sigBlock = `<br><br>${sig}`;
-      if (mode === 'compose') {
-        body = sigBlock;
-      } else {
-        // Reply / forward: signature first, then the quoted block.
-        body = `${sigBlock}\n${body}`;
-      }
-    }
-    setComposeTo(to);setComposeCc(cc);setComposeBcc(bcc);setComposeSubject(subject);setComposeBody(body);setComposeOpen(true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeView, connectedAccounts, emailHeaders, loadEmailDetails, signatures, includeAtmSignature]);
+  // Clear stale selection + cursor when the visible set changes (folder/category
+  // or search). Familiar Gmail rule: a selection belongs to the list you made
+  // it in. (Account switch already clears via switchAccount.)
+  useEffect(() => { clearSelection(); setEditMode(false); setFocusedKey(null); }, [activeCategory, searchQuery, clearSelection, setEditMode]);
 
+  // Keep the keyboard cursor aligned with the opened message so next/prev and
+  // list focus stay coherent.
+  useEffect(() => { if (selectedEmail) setFocusedKey(emailKey(selectedEmail)); }, [selectedEmail]);
+
+  // Canonical composer-session applier. Every entry point (compose / reply /
+  // reply-all / forward / reopen-draft / restore-after-failure) routes through
+  // this so the FULL field set — including composeDraftId, attachments, saving
+  // and sending state, and errors — is deliberately (re)initialized. This is
+  // what fixes the stale composeDraftId leak: the id is always set explicitly.
+  const applyComposerSession = useCallback((s) => {
+    composerSessionRef.current = { baselineBody: s.baselineBody || '', replyContext: s.replyContext || null, mode: s.mode };
+    setComposeMode(s.mode);
+    setComposeOriginalEmail(s.originalEmail || null);
+    setComposeFromAccountId(s.fromAccountId || '');
+    setComposeDraftId(s.draftId || null);
+    setComposeTo(s.to || '');
+    setComposeCc(s.cc || '');
+    setComposeBcc(s.bcc || '');
+    setComposeSubject(s.subject || '');
+    setComposeBody(s.body || '');
+    setComposeShowCcBcc(!!s.showCcBcc);
+    setComposeAttachments(s.attachments || []);
+    setComposeError(null);
+    setComposeSending(false);
+    setDraftSavingState('idle');
+    setDraftLastSavedAt(null);
+    setComposeOpen(true);
+  }, []);
+
+  // Draft save — returns a truthful status so callers and the indicator never
+  // report "Saved" for a request that failed. 'skipped' when there is nothing
+  // meaningful to persist. Attachments are session-only and intentionally NOT
+  // part of what a save persists (see attachment truthfulness below).
   const saveDraft = useCallback(async () => {
-    const fid=composeFromAccountId; if(!fid) return;
-    if(!composeTo.trim()&&!composeSubject.trim()&&!composeBody.trim()) return;
-    try{const r=await fetch(`${API_BASE}/emails/${fid}/drafts`,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({to:composeTo.trim(),cc:composeCc.trim(),bcc:composeBcc.trim(),subject:composeSubject.trim(),body:composeBody,threadId:composeOriginalEmail?.threadId||null,draftId:composeDraftId||null})});if(r.ok){const d=await r.json();if(d.draftId&&d.draftId!==composeDraftId)setComposeDraftId(d.draftId);}}
-    catch(err){console.error('Draft save error:',err);}
-  }, [composeFromAccountId,composeTo,composeCc,composeBcc,composeSubject,composeBody,composeOriginalEmail,composeDraftId]);
+    const fid = composeFromAccountId; if (!fid) return { status: 'skipped' };
+    const meaningful = composerHasContent({ to: composeTo, cc: composeCc, bcc: composeBcc, subject: composeSubject, body: composeBody, baselineBody: composerSessionRef.current?.baselineBody, attachments: [] });
+    if (!meaningful) return { status: 'skipped' };
+    try {
+      const r = await fetch(`${API_BASE}/emails/${fid}/drafts`, {
+        method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: composeTo.trim(), cc: composeCc.trim(), bcc: composeBcc.trim(), subject: composeSubject.trim(), body: composeBody, threadId: composeOriginalEmail?.threadId || null, draftId: composeDraftId || null }),
+      });
+      if (!r.ok) return { status: 'failed' };
+      const d = await r.json().catch(() => null);
+      if (!d || d.success === false) return { status: 'failed' };
+      if (d.draftId && d.draftId !== composeDraftId) setComposeDraftId(d.draftId);
+      return { status: 'saved', draftId: d.draftId };
+    } catch (err) {
+      return { status: 'failed' };
+    }
+  }, [composeFromAccountId, composeTo, composeCc, composeBcc, composeSubject, composeBody, composeOriginalEmail, composeDraftId]);
 
-  useEffect(()=>{saveDraftRef.current=saveDraft;}, [saveDraft]);
+  useEffect(() => { saveDraftRef.current = saveDraft; }, [saveDraft]);
 
-  // Sync the keyboard shortcut callbacks ref now that they're defined
+  // Guard invariant 3: opening another composition must preserve meaningful
+  // in-progress work first. If preservation fails, keep the current composer
+  // open, mark the failure, and abort the replacement (return false).
+  const preserveBeforeReplace = useCallback(async () => {
+    if (!composeOpen || composeSending) return true;
+    const cur = composerSessionRef.current || {};
+    const hasWork = composerHasContent({ to: composeTo, cc: composeCc, bcc: composeBcc, subject: composeSubject, body: composeBody, baselineBody: cur.baselineBody, attachments: composeAttachments });
+    if (!hasWork) return true;
+    const res = await saveDraftRef.current?.();
+    if (res && res.status === 'failed') {
+      setDraftSavingState('failed');
+      setComposeError('Couldn’t save your current message. Resolve this before starting another.');
+      return false;
+    }
+    return true;
+  }, [composeOpen, composeSending, composeTo, composeCc, composeBcc, composeSubject, composeBody, composeAttachments]);
+
+  const openCompose = useCallback(async (mode, email = null) => {
+    if (!(await preserveBeforeReplace())) return;
+    const fromAccountId = mode === 'compose'
+      ? (activeView !== 'everything' ? activeView : connectedAccounts[0]?.id || '')
+      : (email?.accountId || connectedAccounts[0]?.id || '');
+    let headers = {}, fullBody = '';
+    if (mode !== 'compose' && email) {
+      // Reply/forward need the FULL original body from the reader path. If it
+      // can't be loaded, do not open a falsely-ready composer with an empty quote.
+      const detail = await loadEmailDetails(email);
+      if (!detail || !detail.body) { setError('Couldn’t load the original message. Please try again.'); return; }
+      headers = detail.headers || {};
+      fullBody = detail.body || '';
+    }
+    const selfEmail = connectedAccounts.find(a => a.id === fromAccountId)?.gmail_email || '';
+    const signatureHtml = signatures[fromAccountId] || '';
+    const session = buildComposerSession({ mode, email, fromAccountId, headers, fullBodyHtml: fullBody, selfEmail, signatureHtml, includeSignature: includeAtmSignature });
+    applyComposerSession(session);
+  }, [preserveBeforeReplace, activeView, connectedAccounts, loadEmailDetails, signatures, includeAtmSignature, applyComposerSession]);
+
+  // Reopen a saved draft into an editable composer (not the read-only reader).
+  // Restores sending account, recipients, subject, body, and the Gmail draft id.
+  const reopenDraft = useCallback(async (email) => {
+    if (!(await preserveBeforeReplace())) return;
+    const detail = await loadEmailDetails(email);
+    if (!detail) { setError('Couldn’t load that draft. Please try again.'); return; }
+    const h = detail.headers || {};
+    const s = blankComposerSession();
+    s.mode = 'compose';
+    s.originalEmail = email.threadId ? { threadId: email.threadId, accountId: email.accountId } : null;
+    s.fromAccountId = email.accountId || connectedAccounts[0]?.id || '';
+    s.draftId = email.draftId || null;
+    s.to = h.to || '';
+    s.cc = h.cc || '';
+    s.bcc = h.bcc || '';
+    s.subject = h.subject || email.subject || '';
+    s.body = detail.body || '';
+    s.baselineBody = s.body;
+    s.showCcBcc = !!(s.cc || s.bcc);
+    applyComposerSession(s);
+  }, [preserveBeforeReplace, loadEmailDetails, connectedAccounts, applyComposerSession]);
+
+  // Sync the keyboard shortcut callbacks ref now that they're defined. Keyboard
+  // paths call these canonical operations so mouse and keyboard never diverge.
   useEffect(() => {
-    shortcutsRef.current = { archiveEmail, trashEmail, openCompose, selectAllVisible };
-  }, [archiveEmail, trashEmail, openCompose, selectAllVisible]);
+    shortcutsRef.current = { archiveEmail, trashEmail, openCompose, selectAllVisible, spamEmail, markRead, markUnread, starEmail, toggleSelectId, onSelectEmail };
+  }, [archiveEmail, trashEmail, openCompose, selectAllVisible, spamEmail, markRead, markUnread, starEmail, toggleSelectId, onSelectEmail]);
 
   // Persist scheduled sends to localStorage — P2: strip the full email body
   // (and cc/bcc/subject) before writing. Supabase is the system of record
@@ -1537,52 +1670,153 @@ const AllTheMail = () => {
   }, [composeFromAccountId, composeTo, composeCc, composeBcc, composeSubject, composeBody]);
 
 
-  const closeCompose = useCallback(async ()=>{
-    if(composeSending) return; await saveDraft(); setComposeOpen(false);setComposeError(null);setComposeOriginalEmail(null);setComposeAttachments([]);setComposeDraftId(null);
-    if(composeFromAccountId) await loadEmailsForAccount(composeFromAccountId,'drafts');
-  }, [composeSending, saveDraft, composeFromAccountId, loadEmailsForAccount]);
+  // Deliberate From-account switch. Recomputes reply-all self-exclusion against
+  // the newly-chosen sending address so the user is never left cc'ing themselves
+  // (or dropping the wrong address) after switching accounts mid-reply.
+  const changeComposeFrom = useCallback((accountId) => {
+    setComposeFromAccountId(accountId);
+    const cur = composerSessionRef.current;
+    if (cur && cur.mode === 'replyAll' && cur.replyContext) {
+      const selfEmail = connectedAccounts.find(a => a.id === accountId)?.gmail_email || '';
+      const { to, cc } = recomputeForFrom(cur, selfEmail);
+      setComposeTo(to); setComposeCc(cc); setComposeShowCcBcc(!!cc);
+    }
+  }, [connectedAccounts]);
 
-  const sendCompose = useCallback(async () => {
-    setComposeError(null);
-    const fid=composeFromAccountId; if(!fid){setComposeError('Select a sending account');return;} if(!composeTo.trim()){setComposeError('Recipient is required');return;}
-    setComposeSending(true);
+  // Snapshot the complete editable composer session so a failed send can
+  // restore it exactly, and a delayed send fires the content captured at click
+  // time (never state that a later composition may have overwritten).
+  const buildSendSnapshot = useCallback(() => ({
+    mode: composeMode, fromAccountId: composeFromAccountId,
+    to: composeTo, cc: composeCc, bcc: composeBcc, subject: composeSubject,
+    body: composeBody, attachments: composeAttachments, draftId: composeDraftId,
+    originalEmail: composeOriginalEmail,
+    baselineBody: composerSessionRef.current?.baselineBody || '',
+    replyContext: composerSessionRef.current?.replyContext || null,
+  }), [composeMode, composeFromAccountId, composeTo, composeCc, composeBcc, composeSubject, composeBody, composeAttachments, composeDraftId, composeOriginalEmail]);
+
+  const restoreComposerFromSnapshot = useCallback((snap, errorMsg) => {
+    composerSessionRef.current = { baselineBody: snap.baselineBody, replyContext: snap.replyContext, mode: snap.mode };
+    setComposeMode(snap.mode); setComposeOriginalEmail(snap.originalEmail || null);
+    setComposeFromAccountId(snap.fromAccountId); setComposeDraftId(snap.draftId || null);
+    setComposeTo(snap.to); setComposeCc(snap.cc); setComposeBcc(snap.bcc);
+    setComposeSubject(snap.subject); setComposeBody(snap.body);
+    setComposeShowCcBcc(!!(snap.cc || snap.bcc));
+    setComposeAttachments(snap.attachments || []);
+    setComposeSending(false); setComposeOpen(true);
+    if (errorMsg) setComposeError(errorMsg);
+  }, []);
+
+  const closeCompose = useCallback(async () => {
+    if (composeSending) return;
+    // Preserve meaningful work before hiding (invariant 3). If the save fails,
+    // keep the composer open and surface the failure rather than losing content.
+    const cur = composerSessionRef.current || {};
+    const hasWork = composerHasContent({ to: composeTo, cc: composeCc, bcc: composeBcc, subject: composeSubject, body: composeBody, baselineBody: cur.baselineBody, attachments: composeAttachments });
+    if (hasWork) {
+      const res = await saveDraft();
+      if (res && res.status === 'failed') { setDraftSavingState('failed'); setComposeError('Couldn’t save your draft — your message is still here.'); return; }
+    }
+    const fid = composeFromAccountId;
+    setComposeOpen(false); setComposeError(null); setComposeOriginalEmail(null); setComposeAttachments([]); setComposeDraftId(null);
+    composerSessionRef.current = blankComposerSession();
+    if (fid) loadEmailsForAccount(fid, 'drafts').catch(() => {});
+  }, [composeSending, composeTo, composeCc, composeBcc, composeSubject, composeBody, composeAttachments, saveDraft, composeFromAccountId, loadEmailsForAccount]);
+
+  // Deliberate discard — deletes the persisted draft (if any) and clears the
+  // active composer WITHOUT saving. Distinct from close/minimize; the confirm
+  // gate lives in ComposeModal.
+  const discardCompose = useCallback(async () => {
+    const fid = composeFromAccountId, did = composeDraftId;
+    setComposeOpen(false); setComposeError(null); setComposeOriginalEmail(null); setComposeAttachments([]); setComposeDraftId(null);
+    composerSessionRef.current = blankComposerSession();
+    if (fid && did) {
+      try {
+        await fetch(`${API_BASE}/emails/${fid}/drafts/${did}`, { method: 'DELETE', credentials: 'include' });
+        loadEmailsForAccount(fid, 'drafts').catch(() => {});
+      } catch (_) { /* best-effort */ }
+    }
+    emitToast({ message: 'Draft discarded' });
+  }, [composeFromAccountId, composeDraftId, loadEmailsForAccount, emitToast]);
+
+  const sendCompose = useCallback(async (snapshotArg) => {
+    const snap = snapshotArg || buildSendSnapshot();
+    const fid = snap.fromAccountId;
+    if (!fid) { restoreComposerFromSnapshot(snap, 'Select a sending account'); return; }
+    if (!snap.to.trim()) { restoreComposerFromSnapshot(snap, 'Recipient is required'); return; }
+    const account = connectedAccounts.find(a => a.id === fid);
+    const acctLabel = account?.account_name || account?.gmail_email || '';
+    // Immediate acknowledgement: composer is already hidden; show a Sending
+    // toast. Submission ack, provider result, and inbox refresh are separate.
+    setComposeSending(false);
+    emitToast({ message: `Sending${acctLabel ? ` from ${acctLabel}` : ''}…`, persist: true });
     const sigLine = includeAtmSignature ? '<br><div style="margin-top:16px;padding-top:12px;border-top:1px solid #eee;font-size:12px;color:#999;">Sent via <a href="https://allthemail.io" style="color:#FF3A1D;text-decoration:none;">All The Mail</a></div>' : '';
-    const bodyWithSig = composeBody + sigLine;
-    try{
+    const bodyWithSig = snap.body + sigLine;
+    try {
       let r;
-      if(composeAttachments.length>0){const fd=new FormData();fd.append('to',composeTo.trim());fd.append('subject',composeSubject.trim());fd.append('body',bodyWithSig);if(composeCc.trim())fd.append('cc',composeCc.trim());if(composeBcc.trim())fd.append('bcc',composeBcc.trim());if(composeOriginalEmail?.threadId)fd.append('threadId',composeOriginalEmail.threadId);if(composeDraftId)fd.append('draftId',composeDraftId);composeAttachments.forEach(f=>fd.append('attachments',f));r=await fetch(`${API_BASE}/emails/${fid}/send`,{method:'POST',credentials:'include',body:fd});}
-      else{r=await fetch(`${API_BASE}/emails/${fid}/send`,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:composeMode,to:composeTo.trim(),cc:composeCc.trim(),bcc:composeBcc.trim(),subject:composeSubject.trim(),body:bodyWithSig,originalEmailId:composeOriginalEmail?.id||null,threadId:composeOriginalEmail?.threadId||null,draftId:composeDraftId||null,includeSignature:true})});}
-      if(r.ok){await loadEmailsForAccount(fid,activeCategory);await loadEmailsForAccount(fid,'drafts');if(activeView==='everything')connectedAccounts.forEach(a=>{if(a.id!==fid)loadEmailsForAccount(a.id,activeCategory);});setComposeOpen(false);setComposeOriginalEmail(null);setComposeAttachments([]);setComposeDraftId(null);setSuccessToast({ message: 'Message sent' });}
-      else{const d=await r.json().catch(()=>({}));setComposeError(d?.error||'Send failed. If permissions changed, reconnect the account.');}
-    } catch(err){setComposeError(String(err?.message||err));} finally{setComposeSending(false);}
-  }, [composeFromAccountId,composeMode,composeTo,composeCc,composeBcc,composeSubject,composeBody,composeOriginalEmail,composeAttachments,composeDraftId,loadEmailsForAccount,activeCategory,activeView,connectedAccounts,includeAtmSignature]);
+      if (snap.attachments.length > 0) {
+        const fd = new FormData();
+        fd.append('to', snap.to.trim()); fd.append('subject', snap.subject.trim()); fd.append('body', bodyWithSig);
+        if (snap.cc.trim()) fd.append('cc', snap.cc.trim());
+        if (snap.bcc.trim()) fd.append('bcc', snap.bcc.trim());
+        if (snap.originalEmail?.threadId) fd.append('threadId', snap.originalEmail.threadId);
+        if (snap.originalEmail?.id) fd.append('originalEmailId', snap.originalEmail.id);
+        if (snap.draftId) fd.append('draftId', snap.draftId);
+        snap.attachments.forEach(f => fd.append('attachments', f));
+        r = await fetch(`${API_BASE}/emails/${fid}/send`, { method: 'POST', credentials: 'include', body: fd });
+      } else {
+        r = await fetch(`${API_BASE}/emails/${fid}/send`, {
+          method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode: snap.mode, to: snap.to.trim(), cc: snap.cc.trim(), bcc: snap.bcc.trim(), subject: snap.subject.trim(), body: bodyWithSig, originalEmailId: snap.originalEmail?.id || null, threadId: snap.originalEmail?.threadId || null, draftId: snap.draftId || null, includeSignature: true }),
+        });
+      }
+      if (r.ok) {
+        emitToast({ message: `Sent${acctLabel ? ` from ${acctLabel}` : ''}` });
+        // Background refresh — must not turn a successful send into a failure.
+        loadEmailsForAccount(fid, activeCategory).catch(() => {});
+        loadEmailsForAccount(fid, 'drafts').catch(() => {});
+        if (activeView === 'everything') connectedAccounts.forEach(a => { if (a.id !== fid) loadEmailsForAccount(a.id, activeCategory).catch(() => {}); });
+      } else {
+        const d = await r.json().catch(() => ({}));
+        emitToast(null);
+        restoreComposerFromSnapshot(snap, `${d?.error || 'Send failed. If permissions changed, reconnect the account.'}${acctLabel ? ` (account: ${acctLabel})` : ''}`);
+      }
+    } catch (err) {
+      emitToast(null);
+      restoreComposerFromSnapshot(snap, `Send failed${acctLabel ? ` for ${acctLabel}` : ''}: ${String(err?.message || err)}`);
+    }
+  }, [buildSendSnapshot, restoreComposerFromSnapshot, connectedAccounts, emitToast, includeAtmSignature, loadEmailsForAccount, activeCategory, activeView]);
 
   const sendComposeWithDelay = useCallback(() => {
-    if (sendDelaySeconds === 0) {
-      sendCompose();
-      return;
-    }
-    const previewSubject = composeSubject.trim() || '(no subject)';
+    const fid = composeFromAccountId;
+    if (!fid) { setComposeError('Select a sending account'); return; }
+    if (!composeTo.trim()) { setComposeError('Recipient is required'); return; }
+    const snap = buildSendSnapshot();
+    // Immediate acknowledgement: hide the composer right away regardless of delay.
     setComposeOpen(false);
+    if (sendDelaySeconds === 0) { sendCompose(snap); return; }
+    const previewSubject = composeSubject.trim() || '(no subject)';
     let secondsLeft = sendDelaySeconds;
     const interval = setInterval(() => {
       secondsLeft -= 1;
       if (secondsLeft <= 0) {
         clearInterval(interval);
         setPendingSend(null);
-        sendCompose();
+        sendCompose(snap);
       } else {
-        setPendingSend(prev => prev ? { ...prev, secondsLeft } : { secondsLeft, previewSubject, interval });
+        setPendingSend(prev => prev ? { ...prev, secondsLeft } : { secondsLeft, previewSubject, interval, snap });
       }
     }, 1000);
-    setPendingSend({ secondsLeft, previewSubject, interval });
-  }, [sendDelaySeconds, sendCompose, composeSubject]);
+    setPendingSend({ secondsLeft, previewSubject, interval, snap });
+  }, [composeFromAccountId, composeTo, buildSendSnapshot, sendDelaySeconds, sendCompose, composeSubject]);
 
   const cancelPendingSend = useCallback(() => {
     if (pendingSend?.interval) clearInterval(pendingSend.interval);
+    // Restore the exact captured content so no work is lost on undo-send.
+    if (pendingSend?.snap) restoreComposerFromSnapshot(pendingSend.snap);
+    else setComposeOpen(true);
     setPendingSend(null);
-    setComposeOpen(true);
-  }, [pendingSend]);
+  }, [pendingSend, restoreComposerFromSnapshot]);
 
   const useStackedRows = listWidth < 520;
 
@@ -1757,6 +1991,7 @@ const AllTheMail = () => {
               emailHeaders={emailHeaders}
               openCompose={openCompose}
               onSelectEmail={onSelectEmail}
+              archiveEmail={archiveEmail}
               setActiveModule={setActiveModule}
               setActiveView={setActiveView}
               setEmails={setEmails}
@@ -1811,8 +2046,11 @@ const AllTheMail = () => {
                   downloadAttachment={downloadAttachment}
                   loadThread={loadThread}
                   trashEmail={trashEmail} archiveEmail={archiveEmail} starEmail={starEmail}
+                  spamEmail={spamEmail} markRead={markRead} markUnread={markUnread}
                   searchAllAccounts={searchAllAccounts} batchAction={batchAction}
-                  clearSelection={clearSelection} toggleSelectId={toggleSelectId} selectAllVisible={selectAllVisible}
+                  clearSelection={clearSelection} toggleSelectId={toggleSelectId} selectRange={selectRange} selectAllVisible={selectAllVisible}
+                  focusedKey={focusedKey}
+                  reopenDraft={reopenDraft}
                   snoozeEmail={snoozeEmail} getSnoozeOptions={getSnoozeOptions}
                   navigatePrev={navigatePrev} navigateNext={navigateNext} onSelectEmail={onSelectEmail}
                   activeView={activeView}
@@ -1865,7 +2103,7 @@ const AllTheMail = () => {
       <React.Suspense fallback={null}>
         <ComposeModal
           composeOpen={composeOpen} composeMode={composeMode} composeSending={composeSending} composeError={composeError}
-          composeFromAccountId={composeFromAccountId} setComposeFromAccountId={setComposeFromAccountId}
+          composeFromAccountId={composeFromAccountId} setComposeFromAccountId={changeComposeFrom}
           composeTo={composeTo} setComposeTo={setComposeTo}
           composeCc={composeCc} setComposeCc={setComposeCc}
           composeBcc={composeBcc} setComposeBcc={setComposeBcc}
@@ -1876,6 +2114,7 @@ const AllTheMail = () => {
           connectedAccounts={connectedAccounts}
           contacts={contacts}
           closeCompose={closeCompose} sendCompose={sendComposeWithDelay}
+          discardCompose={discardCompose}
           scheduleSend={scheduleSend}
           saveDraft={saveDraft}
           draftSavingState={draftSavingState}
@@ -2062,9 +2301,9 @@ const AllTheMail = () => {
         <div className="toast-success">
           <span>{successToast.message || successToast}</span>
           {successToast.undoFn && (
-            <button onClick={() => { successToast.undoFn(); if(undoTimerRef.current) clearTimeout(undoTimerRef.current); }} className="toast-undo">Undo</button>
+            <button onClick={() => { undoQueueRef.current.cancel(); successToast.undoFn(); }} className="toast-undo">Undo</button>
           )}
-          <button onClick={() => { if(successToast.executeFn) successToast.executeFn(); setSuccessToast(null); if(undoTimerRef.current) clearTimeout(undoTimerRef.current); }} className="toast-x" title="Dismiss"><X size={14} /></button>
+          <button onClick={() => { undoQueueRef.current.flush(); setSuccessToast(null); }} className="toast-x" title="Dismiss"><X size={14} /></button>
         </div>
       )}
 
