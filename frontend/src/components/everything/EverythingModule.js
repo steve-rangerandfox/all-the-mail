@@ -2,6 +2,7 @@ import React from 'react';
 import { Mail, FileText, Calendar, Plus, X, ArrowLeft, Reply, Forward, Users, Archive } from 'lucide-react';
 import { Group as PanelGroup, Panel, Separator as PanelResizeHandle } from 'react-resizable-panels';
 import { getAccountGradient, getDocIcon, formatRelativeEdit, formatTime, stripName, buildEmailSrcDoc, emailHtmlHasRemoteImages } from '../../utils/helpers';
+import { emailKey } from '../../utils/mailIdentity';
 
 const EverythingModule = ({
   evFilteredEmails, evFilteredDocs, evFilteredEvents, filteredAllEvents,
@@ -68,7 +69,7 @@ const EverythingModule = ({
                   const cc = isCascading && idx <= 23 ? ' row--intro' : '';
                   const cs = isCascading && idx <= 23 ? { '--d': `${Math.min(idx, 23) * 36}ms` } : {};
                   return (
-                    <div key={`ev-${email.id}:${cascadeKey}`} className={`email-item${cc}`} onClick={() => openSlideOverEmail(email, idx)}
+                    <div key={`ev-${emailKey(email)}:${cascadeKey}`} className={`email-item${cc}`} onClick={() => openSlideOverEmail(email, idx)}
                       style={{ position: 'relative', padding: '0 16px', minHeight: '48px', ...cs }}>
                       {!email.isRead && grad && <span className="unread-marker" style={{ background: grad.gradient }} />}
                       <div style={{ display: 'grid', gridTemplateColumns: '24px 1fr 72px', gap: '0 10px', alignItems: 'center', width: '100%', minWidth: 0 }}>
@@ -214,7 +215,7 @@ const EverythingModule = ({
               const accountIndex = connectedAccounts.findIndex(a => a.id === email.accountId);
               const grad = accountIndex !== -1 ? getAccountGradient(accountIndex) : null;
               return (
-                <div key={`em-${email.id}-${i}`} className="ev-feed-item ev-feed-email" onClick={() => openSlideOverEmail(email)}>
+                <div key={`em-${emailKey(email)}-${i}`} className="ev-feed-item ev-feed-email" onClick={() => openSlideOverEmail(email)}>
                   <div className="ev-feed-icon"><Mail size={14} strokeWidth={1.5} /></div>
                   <div className="ev-feed-content">
                     <div className="ev-feed-line1">
@@ -285,9 +286,9 @@ const EverythingEmailReader = ({
   loadRemoteImages, onShowImages,
 }) => {
   if (!email) return null;
-  const eid = email.id;
-  const body = emailBodies[eid];
-  const headers = emailHeaders[eid];
+  const ekey = emailKey(email);
+  const body = emailBodies[ekey];
+  const headers = emailHeaders[ekey];
   const accountIndex = connectedAccounts.findIndex(a => a.id === email.accountId);
   const grad = accountIndex !== -1 ? getAccountGradient(accountIndex) : null;
   const accountName = connectedAccounts[accountIndex]?.account_name || connectedAccounts[accountIndex]?.gmail_email || '';
@@ -297,12 +298,13 @@ const EverythingEmailReader = ({
     if (!aid) return;
     try {
       await fetch(`${apiBase}/emails/${aid}/${email.id}/archive`, { method: 'POST', credentials: 'include' });
+      // Scope the optimistic removal to the acted-on account so a colliding id
+      // in another account isn't removed from its list.
       setEmails(p => {
-        const n = { ...p };
-        Object.keys(n).forEach(ai => {
-          Object.keys(n[ai]).forEach(c => { if (n[ai][c]) n[ai][c] = n[ai][c].filter(e => e.id !== email.id); });
-        });
-        return n;
+        const acc = p[aid]; if (!acc) return p;
+        const u = {};
+        for (const c of Object.keys(acc)) u[c] = (acc[c] || []).filter(e => e.id !== email.id);
+        return { ...p, [aid]: u };
       });
       closeSlideOver();
     } catch (err) { setError && setError('Failed to archive'); }

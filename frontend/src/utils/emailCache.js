@@ -4,11 +4,14 @@
 // unavailable (private browsing, old Safari, etc.) — never throws.
 //
 // Shape: key = `${accountId}:${messageId}` → { body, headers, attachments, ts }
+// The composite key is the canonical mail identity (see utils/mailIdentity).
 // TTL: 7 days. We rely on backend Gmail truth to refresh stale bodies.
 //
 // Stale-while-revalidate is enforced by the caller — it should call get()
 // to render immediately, then trigger the network fetch and call set()
 // when fresh data arrives.
+
+import { mailKey } from './mailIdentity';
 
 const DB_NAME = 'atm_email_cache';
 const DB_VERSION = 2; // bump: added 'lists' store
@@ -70,7 +73,9 @@ function openDb() {
   return _dbPromise;
 }
 
-function makeKey(accountId, messageId) { return `${accountId || ''}:${messageId}`; }
+// Canonical composite key (imported so the persisted IndexedDB key stays in
+// lockstep with the rest of the app's mail identity).
+const makeKey = mailKey;
 
 export async function getCached(accountId, messageId) {
   const key = makeKey(accountId, messageId);
@@ -134,8 +139,15 @@ export async function setManyCached(items) {
   } catch { /* ignore */ }
 }
 
-// Hydrate cached bodies for a list of messageIds. Returns three maps the
-// caller can merge into React state. Skips entries that miss or are stale.
+// Hydrate cached bodies for a list of {accountId, messageId} pairs. Returns
+// three maps the caller can merge into React state. Skips entries that miss or
+// are stale.
+//
+// The returned maps are keyed by the COMPOSITE mail key (`${accountId}:${id}`),
+// NOT the bare messageId — two accounts can share a provider-local id, and
+// keying the output by id alone would collapse them (one account's cached body
+// would overwrite the other's). The consuming state (emailBodies/emailHeaders/
+// emailAttachments in useEmail) is keyed the same way.
 export async function hydrateForIds(ids) {
   const bodies = {}, headers = {}, attachments = {};
   if (!ids?.length) return { bodies, headers, attachments };
@@ -143,11 +155,12 @@ export async function hydrateForIds(ids) {
   // No DB → in-memory only
   if (!db) {
     for (const { accountId, messageId } of ids) {
-      const e = _memFallback.get(makeKey(accountId, messageId));
+      const key = makeKey(accountId, messageId);
+      const e = _memFallback.get(key);
       if (e && Date.now() - e.ts < TTL_MS) {
-        bodies[messageId] = e.body;
-        if (e.headers) headers[messageId] = e.headers;
-        if (e.attachments) attachments[messageId] = e.attachments;
+        bodies[key] = e.body;
+        if (e.headers) headers[key] = e.headers;
+        if (e.attachments) attachments[key] = e.attachments;
       }
     }
     return { bodies, headers, attachments };
@@ -160,13 +173,14 @@ export async function hydrateForIds(ids) {
       if (!pending) return resolve({ bodies, headers, attachments });
       const now = Date.now();
       for (const { accountId, messageId } of ids) {
-        const r = store.get(makeKey(accountId, messageId));
+        const key = makeKey(accountId, messageId);
+        const r = store.get(key);
         r.onsuccess = () => {
           const v = r.result;
           if (v && now - v.ts < TTL_MS) {
-            bodies[messageId] = v.body;
-            if (v.headers) headers[messageId] = v.headers;
-            if (v.attachments) attachments[messageId] = v.attachments;
+            bodies[key] = v.body;
+            if (v.headers) headers[key] = v.headers;
+            if (v.attachments) attachments[key] = v.attachments;
           }
           if (--pending === 0) resolve({ bodies, headers, attachments });
         };

@@ -10,6 +10,7 @@ import Avatar from '../Avatar';
 import Sidebar from '../common/Sidebar';
 import { API_BASE } from '../../utils/constants';
 import { getAccountGradient, buildEmailSrcDoc, emailHtmlHasRemoteImages, stripName, getEmailOnly, formatTime } from '../../utils/helpers';
+import { mailKey, emailKey, sameMailItem } from '../../utils/mailIdentity';
 
 const MailModule = ({
   // Split/layout
@@ -214,8 +215,9 @@ const MailModule = ({
         )
       ) : (
         filteredEmails.map((email, idx) => {
-          const isActive = selectedEmail?.id === email.id;
-          const isSelected = selectedIds.has(email.id);
+          const ekey = emailKey(email);
+          const isActive = sameMailItem(selectedEmail, email);
+          const isSelected = selectedIds.has(ekey);
           const accountId = email.accountId || email.source?.account_id;
           const accountIndex = connectedAccounts.findIndex(a => a.id === accountId);
           const grad = accountIndex !== -1 ? getAccountGradient(accountIndex) : null;
@@ -228,18 +230,18 @@ const MailModule = ({
             : stripName(email.from || '');
           const threadBadge = email.threadCount > 1;
 
-          const emailStarred = starredOverrides[email.id] !== undefined ? starredOverrides[email.id] : email.isStarred;
+          const emailStarred = starredOverrides[ekey] !== undefined ? starredOverrides[ekey] : email.isStarred;
           const acct = connectedAccounts[accountIndex];
 
           return (
-            <div key={`${email.accountId||'a'}:${email.id}:${cascadeKey}`} className={`email-item${isActive ? ' active' : ''}${!email.isRead ? ' unread' : ''}${cc}`}
+            <div key={`${ekey}:${cascadeKey}`} className={`email-item${isActive ? ' active' : ''}${!email.isRead ? ' unread' : ''}${cc}`}
               onMouseEnter={() => handleHoverEnter(email)}
               onMouseLeave={handleHoverLeave}
-              onClick={() => { if (editMode) { toggleSelectId(email.id); return; } onSelectEmail(email); }}
-              onTouchStart={(e) => { const t = e.touches[0]; swipeRef.current = { startX: t.clientX, startY: t.clientY, currentX: t.clientX, emailId: email.id }; e.currentTarget.dataset.swipe = ''; }}
-              onTouchMove={(e) => { if (swipeRef.current.emailId === email.id) { swipeRef.current.currentX = e.touches[0].clientX; const d = e.touches[0].clientX - swipeRef.current.startX; if (d < -15) e.currentTarget.dataset.swipe = 'left'; else if (d > 15) e.currentTarget.dataset.swipe = 'right'; else e.currentTarget.dataset.swipe = ''; } }}
+              onClick={() => { if (editMode) { toggleSelectId(email); return; } onSelectEmail(email); }}
+              onTouchStart={(e) => { const t = e.touches[0]; swipeRef.current = { startX: t.clientX, startY: t.clientY, currentX: t.clientX, emailId: ekey }; e.currentTarget.dataset.swipe = ''; }}
+              onTouchMove={(e) => { if (swipeRef.current.emailId === ekey) { swipeRef.current.currentX = e.touches[0].clientX; const d = e.touches[0].clientX - swipeRef.current.startX; if (d < -15) e.currentTarget.dataset.swipe = 'left'; else if (d > 15) e.currentTarget.dataset.swipe = 'right'; else e.currentTarget.dataset.swipe = ''; } }}
               onTouchEnd={(e) => {
-                if (swipeRef.current.emailId !== email.id) return;
+                if (swipeRef.current.emailId !== ekey) return;
                 e.currentTarget.dataset.swipe = '';
                 const delta = swipeRef.current.currentX - swipeRef.current.startX;
                 swipeRef.current = { startX: 0, startY: 0, currentX: 0, emailId: null };
@@ -263,7 +265,7 @@ const MailModule = ({
               ) : (
                 <div className="email-row-grid">
                   {/* Checkbox */}
-                  <button className={`email-checkbox ${isSelected ? 'checked' : ''}`} onClick={e => { e.stopPropagation(); toggleSelectId(email.id); }} title={isSelected ? 'Deselect' : 'Select'}>
+                  <button className={`email-checkbox ${isSelected ? 'checked' : ''}`} onClick={e => { e.stopPropagation(); toggleSelectId(email); }} title={isSelected ? 'Deselect' : 'Select'}>
                     <span className="checkbox-box" />
                   </button>
                   {/* Star */}
@@ -311,7 +313,7 @@ const MailModule = ({
                 </div>
               )}
               {/* Snooze dropdown */}
-              {snoozeDropdownEmailId === email.id && (
+              {snoozeDropdownEmailId === ekey && (
                 <div className="dropdown-menu" style={{ right: 8, top: '100%' }} onMouseDown={e => e.stopPropagation()}>
                   {getSnoozeOptions().map(opt => (
                     <button key={opt.label} className="dropdown-item" onClick={() => snoozeEmail(email, opt.time)}>{opt.label}</button>
@@ -337,20 +339,21 @@ const MailModule = ({
       </div>
     );
 
-    const emailIdx = filteredEmails.findIndex(e => e.id === email.id);
+    const readerKey = emailKey(email);
+    const emailIdx = filteredEmails.findIndex(e => sameMailItem(e, email));
     const emailCount = filteredEmails.length;
     const isFullPage = opts.fullPage;
 
     return (
-      <div className="reader-root" key={email.id} onScroll={handleReaderScroll} ref={readerScrollRef}>
+      <div className="reader-root" key={readerKey} onScroll={handleReaderScroll} ref={readerScrollRef}>
         <div className="reader-toolbar">
           <div className="reader-toolbar-left">
             {isFullPage && (<button className="reader-toolbar-btn" onClick={goBackToList} title="Back to inbox" aria-label="Back to inbox"><ArrowLeft size={16} strokeWidth={1.5} /></button>)}
             <button className="reader-toolbar-btn" onClick={() => archiveEmail(email)} title="Archive" aria-label="Archive email"><Archive size={16} strokeWidth={1.5} /></button>
             <button className="reader-toolbar-btn danger" onClick={() => trashEmail(email)} title="Delete" aria-label="Delete email"><Trash2 size={16} strokeWidth={1.5} /></button>
             <div style={{ position: 'relative' }}>
-              <button className="reader-toolbar-btn" onClick={() => setSnoozeDropdownEmailId(prev => prev === email.id ? null : email.id)} title="Snooze" aria-label="Snooze email" aria-expanded={snoozeDropdownEmailId === email.id} aria-haspopup="true"><Clock size={16} strokeWidth={1.5} /></button>
-              {snoozeDropdownEmailId === email.id && (
+              <button className="reader-toolbar-btn" onClick={() => setSnoozeDropdownEmailId(prev => prev === readerKey ? null : readerKey)} title="Snooze" aria-label="Snooze email" aria-expanded={snoozeDropdownEmailId === readerKey} aria-haspopup="true"><Clock size={16} strokeWidth={1.5} /></button>
+              {snoozeDropdownEmailId === readerKey && (
                 <div onMouseDown={e => e.stopPropagation()} className="dropdown-menu" role="menu">
                   {getSnoozeOptions().map(opt => (
                     <button key={opt.label} className="dropdown-item" role="menuitem" onClick={() => snoozeEmail(email, opt.time)}>
@@ -379,10 +382,10 @@ const MailModule = ({
               </div>
               {showMetadata && (
                 <div style={{ marginTop: '6px', fontSize: '11px', color: 'var(--text-2)', lineHeight: 1.6 }}>
-                  <div>From: {emailHeaders[email.id]?.from || email.from}</div>
-                  <div>To: {emailHeaders[email.id]?.to || '(loading...)'}</div>
-                  {emailHeaders[email.id]?.cc && <div>Cc: {emailHeaders[email.id]?.cc}</div>}
-                  <div>Date: {emailHeaders[email.id]?.date || new Date(email.date).toLocaleString()}</div>
+                  <div>From: {emailHeaders[readerKey]?.from || email.from}</div>
+                  <div>To: {emailHeaders[readerKey]?.to || '(loading...)'}</div>
+                  {emailHeaders[readerKey]?.cc && <div>Cc: {emailHeaders[readerKey]?.cc}</div>}
+                  <div>Date: {emailHeaders[readerKey]?.date || new Date(email.date).toLocaleString()}</div>
                 </div>
               )}
             </div>
@@ -417,15 +420,16 @@ const MailModule = ({
                             body: JSON.stringify({ removeLabelIds: [labelId] }),
                           });
                           setEmails(prev => {
-                            const n = { ...prev };
-                            Object.keys(n).forEach(ai => {
-                              Object.keys(n[ai] || {}).forEach(c => {
-                                if (n[ai][c]) n[ai][c] = n[ai][c].map(e2 =>
-                                  e2.id === email.id ? { ...e2, labelIds: (e2.labelIds || []).filter(l => l !== labelId) } : e2
-                                );
-                              });
-                            });
-                            return n;
+                            // Scope to the acted-on account so a colliding id in
+                            // another account keeps its labels.
+                            const acc = prev[email.accountId]; if (!acc) return prev;
+                            const u = {};
+                            for (const c of Object.keys(acc)) {
+                              u[c] = (acc[c] || []).map(e2 =>
+                                e2.id === email.id ? { ...e2, labelIds: (e2.labelIds || []).filter(l => l !== labelId) } : e2
+                              );
+                            }
+                            return { ...prev, [email.accountId]: u };
                           });
                         }}>
                           <X size={10} />
@@ -504,8 +508,10 @@ const MailModule = ({
                     );
                   }
 
-                  const msgBody = isNewest ? emailBodies[email.id] : emailBodies[m.id];
-                  const msgHeaders = isNewest ? emailHeaders[email.id] : emailHeaders[m.id];
+                  // Thread messages all belong to the reader email's account,
+                  // so key their bodies/headers by that account + each message id.
+                  const msgBody = isNewest ? emailBodies[readerKey] : emailBodies[mailKey(email.accountId, m.id)];
+                  const msgHeaders = isNewest ? emailHeaders[readerKey] : emailHeaders[mailKey(email.accountId, m.id)];
                   const expandedBody = !!expandedBodies[m.id];
 
                   return (
@@ -570,7 +576,7 @@ const MailModule = ({
               </div>
             ) : (
               <>
-              {emailHtmlHasRemoteImages(emailBodies[email.id]) && !loadRemoteImages && (
+              {emailHtmlHasRemoteImages(emailBodies[readerKey]) && !loadRemoteImages && (
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', padding: '8px 12px', background: 'var(--bg-3)', borderBottom: '1px solid var(--line-0)', fontSize: '12px', color: 'var(--text-2)' }}>
                   <span>Remote images are hidden to protect your privacy.</span>
                   {onShowImages && <button className="btn-ghost" style={{ fontSize: '12px', padding: '4px 10px', flexShrink: 0 }} onClick={onShowImages}>Show images</button>}
@@ -578,7 +584,7 @@ const MailModule = ({
               )}
               <iframe title="Email content" ref={iframeRef}
                 sandbox="allow-same-origin allow-popups"
-                srcDoc={buildEmailSrcDoc(emailBodies[email.id] || '<div style="padding:16px;">(no content)</div>', { loadRemoteImages })}
+                srcDoc={buildEmailSrcDoc(emailBodies[readerKey] || '<div style="padding:16px;">(no content)</div>', { loadRemoteImages })}
                 scrolling="no"
                 onLoad={() => {
                   if (iframeResizeCleanupRef.current) iframeResizeCleanupRef.current();
@@ -596,14 +602,14 @@ const MailModule = ({
               </>
             )}
           </div>
-          {emailAttachments[email.id]?.length > 0 && (
+          {emailAttachments[readerKey]?.length > 0 && (
             <div className="attachment-section">
               <div className="attachment-header">
                 <Paperclip size={13} style={{ display: 'inline', marginRight: '6px', verticalAlign: 'middle' }} />
-                {emailAttachments[email.id].length} attachment{emailAttachments[email.id].length !== 1 ? 's' : ''}
+                {emailAttachments[readerKey].length} attachment{emailAttachments[readerKey].length !== 1 ? 's' : ''}
               </div>
               <div className="attachment-list">
-                {emailAttachments[email.id].map((att, idx) => (
+                {emailAttachments[readerKey].map((att, idx) => (
                   <button key={idx} className="btn-ghost" onClick={() => downloadAttachment(email.accountId, email.id, att.attachmentId, att.filename, att.mimeType)}
                     style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 12px', textAlign: 'left' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -692,9 +698,10 @@ const HoverActions = ({ email, archiveEmail, trashEmail, setSnoozeDropdownEmailI
           <button className="row-action-btn danger" onClick={() => trashEmail(email)} title="Delete"><Trash2 size={14} strokeWidth={1.5} /></button>
           <button className="row-action-btn" onClick={async () => {
             await fetch(`${API_BASE}/emails/${email.accountId}/${email.id}/read`, { method: 'POST', credentials: 'include' });
-            setEmails(p => { const n={...p}; Object.keys(n).forEach(ai => { Object.keys(n[ai]).forEach(c => { if(n[ai][c]) n[ai][c]=n[ai][c].map(e2=>e2.id===email.id?{...e2,isRead:true}:e2); }); }); return n; });
+            // Scope to the acted-on account so a colliding id elsewhere isn't marked read.
+            setEmails(p => { const acc = p[email.accountId]; if (!acc) return p; const u = {}; for (const c of Object.keys(acc)) u[c] = (acc[c] || []).map(e2 => e2.id === email.id ? { ...e2, isRead: true } : e2); return { ...p, [email.accountId]: u }; });
           }} title="Mark read"><MailOpen size={14} strokeWidth={1.5} /></button>
-          <button className="row-action-btn" onClick={e2 => { e2.stopPropagation(); setSnoozeDropdownEmailId(prev => prev === email.id ? null : email.id); }} title="Snooze"><BellOff size={14} strokeWidth={1.5} /></button>
+          <button className="row-action-btn" onClick={e2 => { e2.stopPropagation(); const k = emailKey(email); setSnoozeDropdownEmailId(prev => prev === k ? null : k); }} title="Snooze"><BellOff size={14} strokeWidth={1.5} /></button>
         </div>
       ) : (
         <span className="row-time" style={{ color: !email.isRead ? 'var(--text-0)' : 'var(--text-3)', fontWeight: !email.isRead ? 500 : 400 }}>{formatTime(email.date)}</span>
