@@ -1355,7 +1355,7 @@ const AllTheMail = () => {
         if(!selectedEmail) return;
         if(e.key==='ArrowDown'||e.key==='ArrowUp'){
           e.preventDefault();
-          const idx=filteredEmails.findIndex(x=>x.id===selectedEmail.id); if(idx<0) return;
+          const idx=filteredEmails.findIndex(x=>sameMailItem(x,selectedEmail)); if(idx<0) return;
           const ni=e.key==='ArrowDown'?idx+1:idx-1; if(ni<0||ni>=filteredEmails.length) return;
           const ne=filteredEmails[ni]; setSelectedEmail(ne); setShowMetadata(false); loadEmailDetails(ne); loadThread(ne);
           requestAnimationFrame(()=>{const row=document.querySelector(`.email-item:nth-child(${ni+1})`);if(row)row.scrollIntoView({behavior:'smooth',block:'nearest'});});

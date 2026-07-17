@@ -1,6 +1,6 @@
 import { renderHook, act } from '@testing-library/react';
 import { useEmail } from './useEmail';
-import { emailKey } from '../utils/mailIdentity';
+import { emailKey, mailKey, sameMailItem } from '../utils/mailIdentity';
 import * as emailCache from '../utils/emailCache';
 import * as apiErrors from '../utils/apiErrors';
 
@@ -152,5 +152,67 @@ describe('useEmail — account boundary integrity (two accounts, shared DUP1/THR
     act(() => { result.current.setSelectedEmail(itemB()); });
     await act(async () => { result.current.navigatePrev(); });
     expect(result.current.selectedEmail.accountId).toBe(ACCT_A);
+  });
+
+  test('arrow-nav anchor: sameMailItem resolves B-DUP1 at its own index, not the first bare-id match', () => {
+    // The list-navigation handlers (hook navigatePrev/Next and App.js
+    // ArrowUp/ArrowDown) anchor with findIndex(sameMailItem). With A-DUP1 at
+    // index 0 (newer) and B-DUP1 at index 1, anchoring from the selected
+    // B item must resolve index 1 — the bare-id comparison this replaced
+    // would have matched A at index 0.
+    const { result } = setup();
+    const list = result.current.filteredEmails;
+    expect(list).toHaveLength(2);
+    expect(list.findIndex(x => sameMailItem(x, itemB()))).toBe(1);
+    expect(list.findIndex(x => x.id === itemB().id)).toBe(0); // the bug the fix removes
+  });
+});
+
+describe('useEmail — single-account (non-everything) view normalization', () => {
+  // Backend list objects carry NO accountId. getCurrentEmails is the
+  // normalization boundary that must stamp the owning account id in
+  // per-account view (activeView === the account id), or reader keys,
+  // source chips, thread loading, and batch grouping all lose identity.
+  const rawFixture = () => ({
+    [ACCT_A]: { primary: [{ id: DUP, threadId: THREAD, from: 'alice@a.com', subject: 'Message from A', date: '2026-01-02T00:00:00Z', isRead: false, isStarred: false }] },
+    [ACCT_B]: { primary: [{ id: DUP, threadId: THREAD, from: 'bob@b.com', subject: 'Message from B', date: '2026-01-01T00:00:00Z', isRead: false, isStarred: false }] },
+  });
+
+  function setupSingle() {
+    const props = baseProps({ activeView: ACCT_A });
+    const view = renderHook((p) => useEmail(p), { initialProps: props });
+    act(() => { view.result.current.setEmails(rawFixture()); });
+    return { ...view, props };
+  }
+
+  test('raw backend items are stamped with the view account id', () => {
+    const { result } = setupSingle();
+    const list = result.current.filteredEmails;
+    expect(list).toHaveLength(1);
+    expect(list[0].accountId).toBe(ACCT_A);
+    expect(emailKey(list[0])).toBe(mailKey(ACCT_A, DUP));
+  });
+
+  test('reader/load path stores the body under the correct composite key', async () => {
+    const { result } = setupSingle();
+    const email = result.current.filteredEmails[0];
+    await act(async () => { await result.current.loadEmailDetails(email); });
+    // The reader reads emailBodies[emailKey(email)] — the store key must match.
+    expect(result.current.emailBodies[mailKey(ACCT_A, DUP)]).toBe('<p>body</p>');
+    expect(result.current.emailBodies[mailKey('', DUP)]).toBeUndefined();
+    // The fetch hit the correct account's endpoint (derived from the item).
+    expect(global.fetch.mock.calls.some(c => String(c[0]).includes(`/emails/${ACCT_A}/${DUP}`))).toBe(true);
+  });
+
+  test('batch grouping in single-account view targets the view account', async () => {
+    const { result, props } = setupSingle();
+    act(() => { result.current.toggleSelectId(result.current.filteredEmails[0]); });
+    act(() => { result.current.batchAction('archive'); });
+    const toastArg = props.setSuccessToast.mock.calls.at(-1)[0];
+    global.fetch.mockClear();
+    await act(async () => { await toastArg.executeFn(); });
+    const batchUrls = global.fetch.mock.calls.map(c => c[0]).filter(u => String(u).includes('/batch'));
+    expect(batchUrls.some(u => u.includes(`/emails/${ACCT_A}/batch`))).toBe(true);
+    expect(batchUrls).toHaveLength(1);
   });
 });

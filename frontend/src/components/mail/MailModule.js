@@ -234,7 +234,7 @@ const MailModule = ({
           const acct = connectedAccounts[accountIndex];
 
           return (
-            <div key={`${email.accountId||'a'}:${email.id}:${cascadeKey}`} className={`email-item${isActive ? ' active' : ''}${!email.isRead ? ' unread' : ''}${cc}`}
+            <div key={`${ekey}:${cascadeKey}`} className={`email-item${isActive ? ' active' : ''}${!email.isRead ? ' unread' : ''}${cc}`}
               onMouseEnter={() => handleHoverEnter(email)}
               onMouseLeave={handleHoverLeave}
               onClick={() => { if (editMode) { toggleSelectId(email); return; } onSelectEmail(email); }}

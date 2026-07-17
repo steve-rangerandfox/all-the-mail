@@ -446,7 +446,6 @@ router.post('/:accountId/batch-bodies', authenticateToken, async (req, res) => {
   }
 });
 
-// Get email detail
 // Contacts autocomplete: scan the user's recent SENT emails, extract
 // every To/Cc/Bcc address, rank by frequency, return top N. Sent-folder
 // scan is the strongest "people I email" signal — far better than just
@@ -471,7 +470,7 @@ router.get('/:accountId/contacts', authenticateToken, async (req, res) => {
     const account = await verifyAccountOwnership(accountId, req.userId);
     if (!account) return res.status(404).json({ error: 'Account not found' });
 
-    const cacheKey = `${req.userId}:${accountId}`;
+    const cacheKey = `${accountId}:${req.userId}`; // same field order as _accountOwnerCache
     const cached = _contactsCache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) {
       return res.json({ contacts: cached.contacts });
@@ -545,6 +544,7 @@ router.get('/:accountId/contacts', authenticateToken, async (req, res) => {
   }
 });
 
+// Get email detail
 router.get('/:accountId/:messageId', authenticateToken, async (req, res) => {
   try {
     const { accountId, messageId } = req.params;
@@ -1033,7 +1033,7 @@ router.post('/:accountId/batch', authenticateToken, async (req, res) => {
 // scans is the expensive part — Gmail's API is per-message, and we read
 // up to 200 messages per refresh. Cache for 30 minutes per account so
 // repeated compose-modal opens don't re-scan.
-const _contactsCache = new Map(); // `${userId}:${accountId}` → { contacts, expiresAt }
+const _contactsCache = new Map(); // `${accountId}:${userId}` → { contacts, expiresAt }
 const CONTACTS_CACHE_TTL_MS = 30 * 60 * 1000;
 const CONTACTS_SCAN_LIMIT = 200;
 const CONTACTS_RETURN_LIMIT = 250;

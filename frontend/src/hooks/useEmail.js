@@ -3,7 +3,7 @@ import { API_BASE } from '../utils/constants';
 import { stripName } from '../utils/helpers';
 import { getCached, setCached, setManyCached, hydrateForIds, maybeEvict, setCachedList, hydrateLists } from '../utils/emailCache';
 import { maybeHandleApiError } from '../utils/apiErrors';
-import { mailKey, threadKey, emailKey, sameMailItem } from '../utils/mailIdentity';
+import { mailKey, threadKey, emailKey, sameMailItem, snoozeKey } from '../utils/mailIdentity';
 
 export function useEmail({
   connectedAccounts,
@@ -92,7 +92,7 @@ export function useEmail({
       const { snoozes } = await r.json();
 
       const localMap = JSON.parse(localStorage.getItem('atm_snoozed') || '{}');
-      const dbKeys = new Set(snoozes.map(s => `${s.accountId}_${s.messageId}`));
+      const dbKeys = new Set(snoozes.map(s => snoozeKey(s.accountId, s.messageId)));
 
       // Backfill: local entries not in Supabase (fire-and-forget)
       Object.entries(localMap).forEach(([key, val]) => {
@@ -108,7 +108,7 @@ export function useEmail({
       // Merge: Supabase wins on conflict
       const merged = { ...localMap };
       snoozes.forEach(s => {
-        merged[`${s.accountId}_${s.messageId}`] = {
+        merged[snoozeKey(s.accountId, s.messageId)] = {
           emailId: s.messageId,
           accountId: s.accountId,
           until: s.snoozeUntil,
@@ -332,7 +332,13 @@ export function useEmail({
       connectedAccounts.forEach(a => { const ae = emails[a.id]?.[activeCategory] || []; all.push(...ae.map(e => ({ ...e, accountId: a.id }))); });
       list = all.sort((a, b) => new Date(b.date) - new Date(a.date));
     } else {
-      list = emails[activeView]?.[activeCategory] || [];
+      // Normalization boundary: raw backend list objects carry no accountId.
+      // In per-account view activeView IS the owning account id — stamp it
+      // here (mirroring the everything branch above) so every email entering
+      // shared mail state satisfies the account-aware identity invariant.
+      // Reader keys, source chips, thread loading, prefetch, and batch
+      // grouping all rely on email.accountId being present.
+      list = (emails[activeView]?.[activeCategory] || []).map(e => ({ ...e, accountId: activeView }));
     }
 
     if (!conversationView) return list;
@@ -370,7 +376,7 @@ export function useEmail({
   }, [activeView, activeCategory, connectedAccounts, emails, conversationView]);
 
   const filteredEmails = useMemo(() => {
-    const isSnoozed = e => snoozedEmails[`${e.accountId || ''}_${e.id}`];
+    const isSnoozed = e => snoozedEmails[snoozeKey(e.accountId, e.id)];
     if (!searchQuery) {
       return getCurrentEmails().filter(e => !isSnoozed(e));
     }
@@ -548,7 +554,7 @@ export function useEmail({
 
   const snoozeEmail = useCallback((email, until) => {
     if (!email?.id) return;
-    const key = `${email.accountId || ''}_${email.id}`;
+    const key = snoozeKey(email.accountId, email.id);
     setSnoozedEmails(prev => ({ ...prev, [key]: { emailId: email.id, accountId: email.accountId, until: until.toISOString() } }));
     setSnoozeDropdownEmailId(null);
     setSuccessToast({ message: `Snoozed until ${new Date(until).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })}` });

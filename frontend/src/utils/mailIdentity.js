@@ -72,3 +72,16 @@ export function sameMailItem(a, b) {
   if (!a || !b) return false;
   return a.id === b.id && (a.accountId || null) === (b.accountId || null);
 }
+
+/**
+ * Persisted snooze key: `${accountId}_${messageId}` (underscore separator).
+ *
+ * This format predates mailKey and lives in users' browsers (localStorage
+ * `atm_snoozed`) and in the snoozed_emails sync path — it MUST stay
+ * byte-identical or existing snoozes silently orphan. It is already
+ * account-aware (same composite identity as mailKey); only the separator
+ * differs, and only for backward compatibility. Do not "normalize" it to `:`.
+ */
+export function snoozeKey(accountId, messageId) {
+  return `${accountId || ''}_${messageId}`;
+}
