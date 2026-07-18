@@ -4,6 +4,7 @@ import { stripName } from '../utils/helpers';
 import { getCached, setCached, setManyCached, hydrateForIds, maybeEvict, setCachedList, hydrateLists } from '../utils/emailCache';
 import { maybeHandleApiError } from '../utils/apiErrors';
 import { mailKey, threadKey, emailKey, sameMailItem, snoozeKey } from '../utils/mailIdentity';
+import { computeReaderNavigation } from '../utils/readerNav';
 
 export function useEmail({
   connectedAccounts,
@@ -30,6 +31,23 @@ export function useEmail({
   const [emailHeaders, setEmailHeaders] = useState({});
   const emailBodiesRef = useRef({});
   const emailHeadersRef = useRef({});
+  // Composite (account+message) keys with an in-flight body request. Guards
+  // against overlapping duplicate loads — e.g. rapid J/K navigation or a hover
+  // racing the reader — so a burst of triggers collapses to one provider call
+  // per message rather than N concurrent identical fetches.
+  const inFlightDetailsRef = useRef(new Set());
+  // (account:category) keys with an in-flight LIST load. Same dedup guarantee
+  // for list refreshes: a poll racing a manual refresh, or two callers for the
+  // same (account, category), collapse to a single provider request.
+  const inFlightListsRef = useRef(new Set());
+  // Latest connectedAccounts, read via ref so account-scoped loaders don't take
+  // `connectedAccounts` as a hook dependency. That dependency is load-bearing:
+  // loadEmailsForAccount fed App.js's loadAccounts, which SETS connectedAccounts
+  // (a fresh array each call) — so a connectedAccounts dep made loadAccounts
+  // churn identity, re-run its mount effect, and reload accounts+docs+events+mail
+  // in a tight loop (~140 req/s idle). Reading via ref keeps the loader stable.
+  const connectedAccountsRef = useRef(connectedAccounts);
+  useEffect(() => { connectedAccountsRef.current = connectedAccounts; }, [connectedAccounts]);
 
   const [emailAttachments, setEmailAttachments] = useState({});
   const [isLoadingEmails, setIsLoadingEmails] = useState(false);
@@ -133,6 +151,13 @@ export function useEmail({
   const loadEmailsForAccount = useCallback(async (accountId, category = null) => {
     const cats = category ? [category] : ['primary'];
 
+    // In-flight dedup (invariant: one canonical in-flight load per account+
+    // category). The key is account-scoped so two accounts never collapse
+    // together. A duplicate caller (poll racing a manual refresh) no-ops.
+    const listKey = `${accountId}:${cats.join(',')}`;
+    if (inFlightListsRef.current.has(listKey)) return;
+    inFlightListsRef.current.add(listKey);
+
     // Stage 1 — paint cached lists synchronously-ish from IDB. Doesn't
     // block the network refresh below.
     hydrateLists(cats.map(c => ({ accountId, category: c }))).then((hydrated) => {
@@ -160,7 +185,7 @@ export function useEmail({
         // so the global App.js listeners can surface the right UX. Returns
         // ok=false so this category is treated as a soft failure rather
         // than triggering the full unauthed flow that nukes all emails.
-        const account = connectedAccounts.find(a => a.id === accountId);
+        const account = connectedAccountsRef.current.find(a => a.id === accountId);
         if (await maybeHandleApiError(r, account)) {
           return { ok: false, accountId, category: cat };
         }
@@ -187,6 +212,8 @@ export function useEmail({
     const anyOk = results.some(r => r.ok);
     const firstError = results.find(r => r.ok === false);
 
+    inFlightListsRef.current.delete(listKey);
+
     if (anyUnauthed) {
       setIsAuthed(false);
       setEmails({});
@@ -201,11 +228,13 @@ export function useEmail({
       return;
     }
 
+    // Last-known-good: a soft failure (e.g. 429) records the error but never
+    // clears the already-loaded list — only a genuine success overwrites it.
     if (anyOk) setIsAuthed(true);
     if (firstError) setEmailLoadError(firstError);
     else if (anyOk) setEmailLoadError(null);
     setIsLoadingEmails(false);
-  }, [setIsAuthed, connectedAccounts]);
+  }, [setIsAuthed]);
 
   const loadEmailDetails = useCallback(async (email) => {
     if (!email?.id) return;
@@ -217,7 +246,16 @@ export function useEmail({
     // account's body satisfy another account's colliding id (and short-circuit
     // the account-aware IDB read below).
     const key = mailKey(aid, eid);
-    if (emailBodiesRef.current[key] && emailHeadersRef.current[key]) return;
+    if (emailBodiesRef.current[key] && emailHeadersRef.current[key]) {
+      return { body: emailBodiesRef.current[key], headers: emailHeadersRef.current[key] };
+    }
+
+    // Concurrency dedup: if a load for this exact (account, message) is already
+    // in flight, don't start a second one. Rapid J/K navigation or a hover that
+    // races the reader therefore collapses to a single provider call per
+    // message instead of a burst of identical concurrent fetches.
+    if (inFlightDetailsRef.current.has(key)) return;
+    inFlightDetailsRef.current.add(key);
 
     // Stale-while-revalidate: if we have a persisted copy, render it
     // instantly so the reader pane never blanks. The network refresh
@@ -257,6 +295,7 @@ export function useEmail({
           });
           fetch(`${API_BASE}/emails/${aid}/${eid}/read`, { method: 'POST', credentials: 'include' }).catch(() => {});
         }
+        return { body: d.body, headers: d.headers, attachments: d.attachments };
       } else if (r.status === 401) {
         setIsAuthed(false);
         setEmails({});
@@ -270,7 +309,7 @@ export function useEmail({
         return;
       }
     } catch (err) { console.error('Error loading email body:', err); }
-    finally { if (!cacheHit) setIsLoadingBody(false); }
+    finally { inFlightDetailsRef.current.delete(key); if (!cacheHit) setIsLoadingBody(false); }
   }, [connectedAccounts, setIsAuthed]);
 
   const downloadAttachment = useCallback(async (accountId, messageId, attachmentId, filename, mimeType) => {
@@ -412,12 +451,28 @@ export function useEmail({
     return c;
   }, [emails, connectedAccounts]);
 
-  const clearSelection = useCallback(() => setSelectedIds(new Set()), []);
+  const lastSelectedKeyRef = useRef(null);
+  const clearSelection = useCallback(() => { lastSelectedKeyRef.current = null; setSelectedIds(new Set()); }, []);
   // selectedIds holds composite (account, id) keys so selecting a message in
   // one account never selects a colliding-id message in another. Callers pass
   // the full email object; the mutation target is later rebuilt from each
   // item's own fields (never by parsing the key).
-  const toggleSelectId = useCallback((email) => { const k = emailKey(email); setSelectedIds(p => { const n = new Set(p); if (n.has(k)) n.delete(k); else n.add(k); return n; }); }, []);
+  const toggleSelectId = useCallback((email) => { const k = emailKey(email); lastSelectedKeyRef.current = k; setSelectedIds(p => { const n = new Set(p); if (n.has(k)) n.delete(k); else n.add(k); return n; }); }, []);
+  // Shift/range selection: select every visible row between the last-toggled
+  // anchor and the clicked row (inclusive). Falls back to a plain toggle when
+  // there is no anchor yet. Operates purely on filteredEmails (the visible set)
+  // so a range can never reach hidden or other-account messages implicitly.
+  const selectRange = useCallback((email) => {
+    const k = emailKey(email);
+    const anchor = lastSelectedKeyRef.current;
+    if (!anchor) { lastSelectedKeyRef.current = k; setSelectedIds(p => { const n = new Set(p); n.add(k); return n; }); return; }
+    const keys = filteredEmails.map(e => emailKey(e));
+    const i = keys.indexOf(anchor), j = keys.indexOf(k);
+    if (i === -1 || j === -1) { lastSelectedKeyRef.current = k; setSelectedIds(p => { const n = new Set(p); n.add(k); return n; }); return; }
+    const [lo, hi] = i <= j ? [i, j] : [j, i];
+    setSelectedIds(p => { const n = new Set(p); for (let x = lo; x <= hi; x++) n.add(keys[x]); return n; });
+    lastSelectedKeyRef.current = k;
+  }, [filteredEmails]);
   const selectAllVisible = useCallback(() => { setSelectedIds(() => new Set(filteredEmails.map(e => emailKey(e)))); }, [filteredEmails]);
 
   const groupSelectedByAccount = useCallback(() => {
@@ -477,6 +532,49 @@ export function useEmail({
     setSuccessToast({ message: 'Email archived', undoFn, executeFn });
   }, [selectedEmail, removeEmailIds, emails, setError, setSuccessToast, setShowMetadata, setFullPageReaderOpen, connectedAccounts]);
 
+  // Report spam — same optimistic-remove + deferred-undo shape as archive, but
+  // the provider call moves the message to SPAM (removing INBOX). Account-scoped.
+  const spamEmail = useCallback((email) => {
+    if (!email?.id || !email?.accountId) return;
+    const snapshot = { ...emails };
+    removeEmailIds(email.accountId, [email.id]);
+    if (sameMailItem(selectedEmail, email)) {
+      setSelectedEmail(null); setSelectedThread(null); setSelectedThreadActiveMessageId(null);
+      if (setShowMetadata) setShowMetadata(false);
+      if (setFullPageReaderOpen) setFullPageReaderOpen(false);
+    }
+    const executeFn = async () => {
+      try {
+        const r = await fetch(`${API_BASE}/emails/${email.accountId}/${email.id}/labels`, {
+          method: 'POST', credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ addLabelIds: ['SPAM'], removeLabelIds: ['INBOX'] }),
+        });
+        const account = connectedAccounts.find(a => a.id === email.accountId);
+        if (await maybeHandleApiError(r, account)) { setEmails(snapshot); return; }
+        if (!r.ok) { setEmails(snapshot); setError('Failed to report spam'); }
+      } catch (err) { setEmails(snapshot); setError('Failed to report spam'); }
+    };
+    const undoFn = () => { setEmails(snapshot); setSuccessToast(null); };
+    setSuccessToast({ message: 'Reported spam', undoFn, executeFn });
+  }, [selectedEmail, removeEmailIds, emails, setError, setSuccessToast, setShowMetadata, setFullPageReaderOpen, connectedAccounts]);
+
+  // Mark read / unread. Instant (no undo). Optimistically scoped to the
+  // acted-on account so a colliding id elsewhere is never flipped.
+  const setReadState = useCallback(async (email, read) => {
+    if (!email?.id || !email?.accountId) return;
+    const aid = email.accountId, eid = email.id;
+    setEmails(p => { const acc = p[aid]; if (!acc) return p; const u = {}; for (const c of Object.keys(acc)) u[c] = (acc[c] || []).map(e => e.id === eid ? { ...e, isRead: read } : e); return { ...p, [aid]: u }; });
+    try {
+      const r = await fetch(`${API_BASE}/emails/${aid}/${eid}/${read ? 'read' : 'unread'}`, { method: 'POST', credentials: 'include' });
+      const account = connectedAccounts.find(a => a.id === aid);
+      if (await maybeHandleApiError(r, account)) return;
+      if (!r.ok) { setEmails(p => { const acc = p[aid]; if (!acc) return p; const u = {}; for (const c of Object.keys(acc)) u[c] = (acc[c] || []).map(e => e.id === eid ? { ...e, isRead: !read } : e); return { ...p, [aid]: u }; }); }
+    } catch (err) { /* revert on failure */ setEmails(p => { const acc = p[aid]; if (!acc) return p; const u = {}; for (const c of Object.keys(acc)) u[c] = (acc[c] || []).map(e => e.id === eid ? { ...e, isRead: !read } : e); return { ...p, [aid]: u }; }); }
+  }, [connectedAccounts]);
+  const markRead = useCallback((email) => setReadState(email, true), [setReadState]);
+  const markUnread = useCallback((email) => setReadState(email, false), [setReadState]);
+
   const starEmail = useCallback(async (email) => {
     if (!email?.id || !email?.accountId) return;
     // Composite key so a star toggle stays on the acted-on account's message.
@@ -529,7 +627,14 @@ export function useEmail({
     if (selectedIds.size === 0) return;
     const snapshot = { ...emails };
     const byAccount = groupSelectedByAccount();
-    const affectedIds = new Set(selectedIds);
+    // Count only messages that are actually present in the visible set. A stale
+    // selection (e.g. left over from another folder) must never report success
+    // for an operation that touched nothing.
+    const affectedCount = [...byAccount.values()].reduce((n, ids) => n + ids.length, 0);
+    if (affectedCount === 0) { clearSelection(); setEditMode(false); return; }
+    // Rebuild the affected key set from what's actually being removed.
+    const affectedIds = new Set();
+    for (const e of filteredEmails) { if (selectedIds.has(emailKey(e)) && e.accountId && byAccount.has(e.accountId)) affectedIds.add(emailKey(e)); }
     byAccount.forEach((ids, aid) => removeEmailIds(aid, ids));
     if (selectedEmail && affectedIds.has(emailKey(selectedEmail))) {
       setSelectedEmail(null); setSelectedThread(null); setSelectedThreadActiveMessageId(null);
@@ -537,7 +642,7 @@ export function useEmail({
       if (setFullPageReaderOpen) setFullPageReaderOpen(false);
     }
     clearSelection(); setEditMode(false);
-    const label = action === 'archive' ? `Archived ${affectedIds.size} message${affectedIds.size !== 1 ? 's' : ''}` : `Deleted ${affectedIds.size} message${affectedIds.size !== 1 ? 's' : ''}`;
+    const label = action === 'archive' ? `Archived ${affectedCount} message${affectedCount !== 1 ? 's' : ''}` : `Deleted ${affectedCount} message${affectedCount !== 1 ? 's' : ''}`;
     const executeFn = async () => {
       setBatchWorking(true);
       try {
@@ -550,7 +655,7 @@ export function useEmail({
     };
     const undoFn = () => { setEmails(snapshot); setSuccessToast(null); };
     setSuccessToast({ message: label, undoFn, executeFn });
-  }, [selectedIds, emails, groupSelectedByAccount, removeEmailIds, selectedEmail, clearSelection, setError, setSuccessToast, setShowMetadata, setFullPageReaderOpen]);
+  }, [selectedIds, emails, groupSelectedByAccount, removeEmailIds, selectedEmail, clearSelection, setError, setSuccessToast, setShowMetadata, setFullPageReaderOpen, filteredEmails]);
 
   const snoozeEmail = useCallback((email, until) => {
     if (!email?.id) return;
@@ -587,29 +692,25 @@ export function useEmail({
     ];
   }, []);
 
-  const navigatePrev = useCallback(() => {
-    if (!selectedEmail) return;
-    const i = filteredEmails.findIndex(e => sameMailItem(e, selectedEmail));
-    if (i > 0) {
-      const p = filteredEmails[i - 1];
-      setSelectedEmail(p);
-      if (setShowMetadata) setShowMetadata(false);
-      loadEmailDetails(p); loadThread(p);
-      filteredEmails.slice(Math.max(0, i - 15), i - 1).forEach((e, j) => setTimeout(() => loadEmailDetails(e), (j + 1) * 50));
-    }
+  // One reader-navigation step loads ONLY the destination message (plus its
+  // thread for conversation view). It deliberately does NOT fan out speculative
+  // body loads for surrounding messages: with multiple connected accounts that
+  // amplified a single J/K press into ~16 provider requests and exhausted the
+  // Google API quota, whose 429s then degraded the reader ("of 0", lost source
+  // chip) and the list. See utils/readerNav.js for the invariant. Destination
+  // loads are deduped/cache-checked inside loadEmailDetails, so rapid repeated
+  // navigation cannot pile up overlapping request bursts.
+  const navigateReader = useCallback((direction) => {
+    const move = computeReaderNavigation(filteredEmails, selectedEmail, direction);
+    if (!move) return;
+    setSelectedEmail(move.destination);
+    if (setShowMetadata) setShowMetadata(false);
+    loadEmailDetails(move.destination);
+    loadThread(move.destination);
   }, [selectedEmail, filteredEmails, loadEmailDetails, loadThread, setShowMetadata]);
 
-  const navigateNext = useCallback(() => {
-    if (!selectedEmail) return;
-    const i = filteredEmails.findIndex(e => sameMailItem(e, selectedEmail));
-    if (i < filteredEmails.length - 1) {
-      const n = filteredEmails[i + 1];
-      setSelectedEmail(n);
-      if (setShowMetadata) setShowMetadata(false);
-      loadEmailDetails(n); loadThread(n);
-      filteredEmails.slice(i + 2, i + 17).forEach((e, j) => setTimeout(() => loadEmailDetails(e), (j + 1) * 50));
-    }
-  }, [selectedEmail, filteredEmails, loadEmailDetails, loadThread, setShowMetadata]);
+  const navigatePrev = useCallback(() => navigateReader('prev'), [navigateReader]);
+  const navigateNext = useCallback(() => navigateReader('next'), [navigateReader]);
 
   const onSelectEmail = useCallback((email) => {
     setSelectedEmail(email);
@@ -716,8 +817,9 @@ export function useEmail({
     filteredEmails, allEmails, categoryCounts,
     loadEmailsForAccount, loadEmailDetails, downloadAttachment, loadThread,
     getCurrentEmails, trashEmail, archiveEmail, starEmail,
+    spamEmail, markRead, markUnread,
     searchAllAccounts, batchAction,
-    clearSelection, toggleSelectId, selectAllVisible,
+    clearSelection, toggleSelectId, selectRange, selectAllVisible,
     snoozeEmail, getSnoozeOptions, syncSnoozed,
     navigatePrev, navigateNext, onSelectEmail,
     setEmails, setEmailBodies, setEmailHeaders, setEmailAttachments,
