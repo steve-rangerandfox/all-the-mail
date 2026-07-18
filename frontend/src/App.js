@@ -1723,20 +1723,41 @@ const AllTheMail = () => {
     if (errorMsg) setComposeError(errorMsg);
   }, []);
 
+  // Close the composer, preserving meaningful work first (invariant 3).
+  //
+  // Returns a structured result so the caller (ComposeModal) can drive the
+  // close/save-failure decision UI:
+  //   { closed: true }               — nothing to save, or the draft was saved;
+  //                                    the composer has been torn down.
+  //   { closed: false, failed: true } — a save was attempted and FAILED; the
+  //                                    composer is left fully intact (recipients,
+  //                                    subject, body, sending account, quoted
+  //                                    content, attachments) and NOT closed.
+  //
+  // The invariant: meaningful unsaved work is never dismissed silently after a
+  // failed preservation. This function alone never discards on failure — it
+  // reports the failure upward and the modal offers Retry / Keep editing /
+  // Discard. A save already in flight cannot cause a silent close because we
+  // only tear down on an explicit save success/skip below.
   const closeCompose = useCallback(async () => {
-    if (composeSending) return;
-    // Preserve meaningful work before hiding (invariant 3). If the save fails,
-    // keep the composer open and surface the failure rather than losing content.
+    if (composeSending) return { closed: false, failed: false };
     const cur = composerSessionRef.current || {};
     const hasWork = composerHasContent({ to: composeTo, cc: composeCc, bcc: composeBcc, subject: composeSubject, body: composeBody, baselineBody: cur.baselineBody, attachments: composeAttachments });
     if (hasWork) {
       const res = await saveDraft();
-      if (res && res.status === 'failed') { setDraftSavingState('failed'); setComposeError('Couldn’t save your draft — your message is still here.'); return; }
+      if (res && res.status === 'failed') {
+        // Keep everything intact; hand the decision to the modal. Do NOT set
+        // composeError here — the modal's Retry/Keep/Discard dialog owns the
+        // messaging (composeError's Retry button sends, which is wrong here).
+        setDraftSavingState('failed');
+        return { closed: false, failed: true };
+      }
     }
     const fid = composeFromAccountId;
     setComposeOpen(false); setComposeError(null); setComposeOriginalEmail(null); setComposeAttachments([]); setComposeDraftId(null);
     composerSessionRef.current = blankComposerSession();
     if (fid) loadEmailsForAccount(fid, 'drafts').catch(() => {});
+    return { closed: true, failed: false };
   }, [composeSending, composeTo, composeCc, composeBcc, composeSubject, composeBody, composeAttachments, saveDraft, composeFromAccountId, loadEmailsForAccount]);
 
   // Deliberate discard — deletes the persisted draft (if any) and clears the

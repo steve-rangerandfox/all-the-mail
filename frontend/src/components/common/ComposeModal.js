@@ -89,6 +89,11 @@ const ComposeModal = ({
   const [confirmingEmptySubject, setConfirmingEmptySubject] = useState(false);
   const [confirmingDiscard, setConfirmingDiscard] = useState(false);
   const [confirmingClose, setConfirmingClose] = useState(false);
+  // Close-after-failed-save decision gate. When a close is requested but the
+  // draft can't be preserved, we surface Retry save / Keep editing / Discard
+  // instead of silently dropping the user's work.
+  const [confirmingSaveFailed, setConfirmingSaveFailed] = useState(false);
+  const [retryingSave, setRetryingSave] = useState(false);
   const [toError, setToError] = useState(false);
   const fileInputRef = useRef(null);
   const imageInputRef = useRef(null);
@@ -246,9 +251,20 @@ const ComposeModal = ({
   // Meaningful-content check for the discard confirmation gate.
   const bodyText = (composeBody || '').replace(/<[^>]+>/g, '').replace(/&nbsp;/gi, ' ').trim();
   const hasContent = !!(composeTo.trim() || composeCc.trim() || composeBcc.trim() || composeSubject.trim() || composeAttachments.length || bodyText);
+  // Attempt to close: closeCompose saves any meaningful work first and only
+  // tears the composer down on success. If preservation fails it returns
+  // { failed: true } and leaves every field intact — we then raise the
+  // Retry / Keep editing / Discard decision instead of losing the message.
+  const attemptClose = async () => {
+    const res = await closeCompose();
+    if (res && res.failed) { setConfirmingSaveFailed(true); return false; }
+    setConfirmingSaveFailed(false);
+    return true;
+  };
   // Close saves the draft, but session-only attachments would be lost — warn.
-  const handleCloseClick = () => { if (composeAttachments.length > 0) { setConfirmingClose(true); return; } closeCompose(); };
+  const handleCloseClick = () => { if (composeAttachments.length > 0) { setConfirmingClose(true); return; } attemptClose(); };
   const handleDiscardClick = () => { if (hasContent) { setConfirmingDiscard(true); return; } discardCompose?.(); };
+  const handleRetrySave = async () => { setRetryingSave(true); try { await attemptClose(); } finally { setRetryingSave(false); } };
 
   const title = composeMode === 'compose' ? 'New Message'
     : composeMode === 'reply' ? 'Reply'
@@ -437,7 +453,15 @@ const ComposeModal = ({
             <div className="docked-error">
               <span>{composeAttachments.length} attachment{composeAttachments.length !== 1 ? 's' : ''} won’t be saved with the draft. Close anyway?</span>
               <button className="btn-ghost" style={{ fontSize: 11 }} onClick={() => setConfirmingClose(false)}>Cancel</button>
-              <button className="btn btn-primary" style={{ fontSize: 11 }} onClick={() => { setConfirmingClose(false); closeCompose(); }}>Close</button>
+              <button className="btn btn-primary" style={{ fontSize: 11 }} onClick={() => { setConfirmingClose(false); attemptClose(); }}>Close</button>
+            </div>
+          )}
+          {confirmingSaveFailed && (
+            <div className="docked-error" role="alertdialog" aria-label="Draft could not be saved">
+              <span>Couldn’t save your draft — your message is still here.</span>
+              <button className="btn btn-primary" style={{ fontSize: 11 }} disabled={retryingSave} onClick={handleRetrySave}>{retryingSave ? 'Saving…' : 'Retry save'}</button>
+              <button className="btn-ghost" style={{ fontSize: 11 }} onClick={() => setConfirmingSaveFailed(false)}>Keep editing</button>
+              <button className="btn btn-primary danger" style={{ fontSize: 11 }} onClick={() => { setConfirmingSaveFailed(false); discardCompose?.(); }}>Discard</button>
             </div>
           )}
 

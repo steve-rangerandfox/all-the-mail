@@ -4,6 +4,7 @@ import { stripName } from '../utils/helpers';
 import { getCached, setCached, setManyCached, hydrateForIds, maybeEvict, setCachedList, hydrateLists } from '../utils/emailCache';
 import { maybeHandleApiError } from '../utils/apiErrors';
 import { mailKey, threadKey, emailKey, sameMailItem, snoozeKey } from '../utils/mailIdentity';
+import { computeReaderNavigation } from '../utils/readerNav';
 
 export function useEmail({
   connectedAccounts,
@@ -30,6 +31,11 @@ export function useEmail({
   const [emailHeaders, setEmailHeaders] = useState({});
   const emailBodiesRef = useRef({});
   const emailHeadersRef = useRef({});
+  // Composite (account+message) keys with an in-flight body request. Guards
+  // against overlapping duplicate loads — e.g. rapid J/K navigation or a hover
+  // racing the reader — so a burst of triggers collapses to one provider call
+  // per message rather than N concurrent identical fetches.
+  const inFlightDetailsRef = useRef(new Set());
 
   const [emailAttachments, setEmailAttachments] = useState({});
   const [isLoadingEmails, setIsLoadingEmails] = useState(false);
@@ -221,6 +227,13 @@ export function useEmail({
       return { body: emailBodiesRef.current[key], headers: emailHeadersRef.current[key] };
     }
 
+    // Concurrency dedup: if a load for this exact (account, message) is already
+    // in flight, don't start a second one. Rapid J/K navigation or a hover that
+    // races the reader therefore collapses to a single provider call per
+    // message instead of a burst of identical concurrent fetches.
+    if (inFlightDetailsRef.current.has(key)) return;
+    inFlightDetailsRef.current.add(key);
+
     // Stale-while-revalidate: if we have a persisted copy, render it
     // instantly so the reader pane never blanks. The network refresh
     // below will overwrite if Gmail returns something newer.
@@ -273,7 +286,7 @@ export function useEmail({
         return;
       }
     } catch (err) { console.error('Error loading email body:', err); }
-    finally { if (!cacheHit) setIsLoadingBody(false); }
+    finally { inFlightDetailsRef.current.delete(key); if (!cacheHit) setIsLoadingBody(false); }
   }, [connectedAccounts, setIsAuthed]);
 
   const downloadAttachment = useCallback(async (accountId, messageId, attachmentId, filename, mimeType) => {
@@ -656,29 +669,25 @@ export function useEmail({
     ];
   }, []);
 
-  const navigatePrev = useCallback(() => {
-    if (!selectedEmail) return;
-    const i = filteredEmails.findIndex(e => sameMailItem(e, selectedEmail));
-    if (i > 0) {
-      const p = filteredEmails[i - 1];
-      setSelectedEmail(p);
-      if (setShowMetadata) setShowMetadata(false);
-      loadEmailDetails(p); loadThread(p);
-      filteredEmails.slice(Math.max(0, i - 15), i - 1).forEach((e, j) => setTimeout(() => loadEmailDetails(e), (j + 1) * 50));
-    }
+  // One reader-navigation step loads ONLY the destination message (plus its
+  // thread for conversation view). It deliberately does NOT fan out speculative
+  // body loads for surrounding messages: with multiple connected accounts that
+  // amplified a single J/K press into ~16 provider requests and exhausted the
+  // Google API quota, whose 429s then degraded the reader ("of 0", lost source
+  // chip) and the list. See utils/readerNav.js for the invariant. Destination
+  // loads are deduped/cache-checked inside loadEmailDetails, so rapid repeated
+  // navigation cannot pile up overlapping request bursts.
+  const navigateReader = useCallback((direction) => {
+    const move = computeReaderNavigation(filteredEmails, selectedEmail, direction);
+    if (!move) return;
+    setSelectedEmail(move.destination);
+    if (setShowMetadata) setShowMetadata(false);
+    loadEmailDetails(move.destination);
+    loadThread(move.destination);
   }, [selectedEmail, filteredEmails, loadEmailDetails, loadThread, setShowMetadata]);
 
-  const navigateNext = useCallback(() => {
-    if (!selectedEmail) return;
-    const i = filteredEmails.findIndex(e => sameMailItem(e, selectedEmail));
-    if (i < filteredEmails.length - 1) {
-      const n = filteredEmails[i + 1];
-      setSelectedEmail(n);
-      if (setShowMetadata) setShowMetadata(false);
-      loadEmailDetails(n); loadThread(n);
-      filteredEmails.slice(i + 2, i + 17).forEach((e, j) => setTimeout(() => loadEmailDetails(e), (j + 1) * 50));
-    }
-  }, [selectedEmail, filteredEmails, loadEmailDetails, loadThread, setShowMetadata]);
+  const navigatePrev = useCallback(() => navigateReader('prev'), [navigateReader]);
+  const navigateNext = useCallback(() => navigateReader('next'), [navigateReader]);
 
   const onSelectEmail = useCallback((email) => {
     setSelectedEmail(email);
