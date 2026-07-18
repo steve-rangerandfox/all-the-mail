@@ -36,6 +36,18 @@ export function useEmail({
   // racing the reader — so a burst of triggers collapses to one provider call
   // per message rather than N concurrent identical fetches.
   const inFlightDetailsRef = useRef(new Set());
+  // (account:category) keys with an in-flight LIST load. Same dedup guarantee
+  // for list refreshes: a poll racing a manual refresh, or two callers for the
+  // same (account, category), collapse to a single provider request.
+  const inFlightListsRef = useRef(new Set());
+  // Latest connectedAccounts, read via ref so account-scoped loaders don't take
+  // `connectedAccounts` as a hook dependency. That dependency is load-bearing:
+  // loadEmailsForAccount fed App.js's loadAccounts, which SETS connectedAccounts
+  // (a fresh array each call) — so a connectedAccounts dep made loadAccounts
+  // churn identity, re-run its mount effect, and reload accounts+docs+events+mail
+  // in a tight loop (~140 req/s idle). Reading via ref keeps the loader stable.
+  const connectedAccountsRef = useRef(connectedAccounts);
+  useEffect(() => { connectedAccountsRef.current = connectedAccounts; }, [connectedAccounts]);
 
   const [emailAttachments, setEmailAttachments] = useState({});
   const [isLoadingEmails, setIsLoadingEmails] = useState(false);
@@ -139,6 +151,13 @@ export function useEmail({
   const loadEmailsForAccount = useCallback(async (accountId, category = null) => {
     const cats = category ? [category] : ['primary'];
 
+    // In-flight dedup (invariant: one canonical in-flight load per account+
+    // category). The key is account-scoped so two accounts never collapse
+    // together. A duplicate caller (poll racing a manual refresh) no-ops.
+    const listKey = `${accountId}:${cats.join(',')}`;
+    if (inFlightListsRef.current.has(listKey)) return;
+    inFlightListsRef.current.add(listKey);
+
     // Stage 1 — paint cached lists synchronously-ish from IDB. Doesn't
     // block the network refresh below.
     hydrateLists(cats.map(c => ({ accountId, category: c }))).then((hydrated) => {
@@ -166,7 +185,7 @@ export function useEmail({
         // so the global App.js listeners can surface the right UX. Returns
         // ok=false so this category is treated as a soft failure rather
         // than triggering the full unauthed flow that nukes all emails.
-        const account = connectedAccounts.find(a => a.id === accountId);
+        const account = connectedAccountsRef.current.find(a => a.id === accountId);
         if (await maybeHandleApiError(r, account)) {
           return { ok: false, accountId, category: cat };
         }
@@ -193,6 +212,8 @@ export function useEmail({
     const anyOk = results.some(r => r.ok);
     const firstError = results.find(r => r.ok === false);
 
+    inFlightListsRef.current.delete(listKey);
+
     if (anyUnauthed) {
       setIsAuthed(false);
       setEmails({});
@@ -207,11 +228,13 @@ export function useEmail({
       return;
     }
 
+    // Last-known-good: a soft failure (e.g. 429) records the error but never
+    // clears the already-loaded list — only a genuine success overwrites it.
     if (anyOk) setIsAuthed(true);
     if (firstError) setEmailLoadError(firstError);
     else if (anyOk) setEmailLoadError(null);
     setIsLoadingEmails(false);
-  }, [setIsAuthed, connectedAccounts]);
+  }, [setIsAuthed]);
 
   const loadEmailDetails = useCallback(async (email) => {
     if (!email?.id) return;

@@ -235,6 +235,12 @@ const AllTheMail = () => {
   // for content-change detection and From-switch recompute. See composerSession.
   const composerSessionRef = useRef(blankComposerSession());
   const pollingIntervalRef = useRef(null);
+  // Guards the initial accounts load so it fires exactly once regardless of any
+  // future churn in loadAccounts' identity. The account list is (re)loaded on
+  // explicit events afterwards — OAuth/scope-upgrade return, add/remove account
+  // — never by an effect re-running. (Belt-and-suspenders alongside the stable
+  // loadEmailsForAccount fix that removed the reload loop at its source.)
+  const didInitialAccountsLoadRef = useRef(false);
   const cascadeTimestampRef = useRef(Date.now());
   const hasAnimatedRef = useRef(false);
   const readerScrollRef = useRef(null);
@@ -967,7 +973,11 @@ const AllTheMail = () => {
   }, []);
   const removeAttachment = useCallback((i)=>{setComposeAttachments(p=>p.filter((_,j)=>j!==i));}, []);
 
-  useEffect(()=>{loadAccounts();}, [loadAccounts]);
+  useEffect(() => {
+    if (didInitialAccountsLoadRef.current) return;
+    didInitialAccountsLoadRef.current = true;
+    loadAccounts();
+  }, [loadAccounts]);
 
   // Keep loadAccountsRef in sync so the popup-message listener (defined
   // earlier — before loadAccounts existed in scope) can fire it without
