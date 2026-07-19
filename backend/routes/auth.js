@@ -2,7 +2,7 @@ import { Router } from 'express';
 import jwt from 'jsonwebtoken';
 import { google } from 'googleapis';
 import supabase from '../lib/supabase.js';
-import { oauth2Client, newOAuth2Client, MINIMUM_SCOPES, SERVICE_SCOPES, encryptToken, decryptToken } from '../lib/google.js';
+import { oauth2Client, signinOAuth2Client, newOAuth2Client, newSigninOAuth2Client, MINIMUM_SCOPES, SERVICE_SCOPES, encryptToken, decryptToken } from '../lib/google.js';
 import { JWT_SECRET, authenticateToken } from '../middleware/auth.js';
 import { issueOAuthState, consumeOAuthState, revokeJti, newJti } from '../lib/security.js';
 import { safeLogError } from '../lib/log.js';
@@ -12,15 +12,21 @@ const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3001';
 const router = Router();
 
 router.get('/google', (req, res) => {
-  // P1.12 — Sign-in requests profile/email only (non-sensitive). All
-  // Gmail/Drive/Calendar scopes are requested incrementally via
-  // /accounts/upgrade-scopes/:group when the user activates that
-  // feature. Keeps sign-up warning-free + outside the 100-user cap.
-  const authUrl = oauth2Client.generateAuthUrl({
+  // P1.12 / two-project split — sign-in goes through the dedicated
+  // signinOAuth2Client (separate Cloud project, only declares profile +
+  // email on its consent screen, no sensitive scopes). Because Google
+  // evaluates the warning per-project-not-per-request, that project
+  // never triggers the "Google hasn't verified this app" screen at
+  // sign-in. The state payload's `purpose: 'signin'` tells the callback
+  // to use newSigninOAuth2Client for the code exchange and to skip
+  // gmail_accounts persistence (Project A tokens grant only profile/email
+  // and are useless beyond identity verification).
+  const authUrl = signinOAuth2Client.generateAuthUrl({
     access_type: 'offline',
     scope: MINIMUM_SCOPES,
     prompt: 'consent',
-    include_granted_scopes: true
+    include_granted_scopes: true,
+    state: issueOAuthState({ purpose: 'signin' }),
   });
   res.redirect(authUrl);
 });
@@ -32,26 +38,21 @@ router.get('/google/callback', async (req, res) => {
   }
 
   try {
-    // P1.9 — fresh OAuth client per callback. The exported singleton is
-    // mutated by setCredentials, which under concurrent callbacks can leak
-    // user A's tokens into user B's userinfo.get() call.
-    const callbackClient = newOAuth2Client();
-    const { tokens } = await callbackClient.getToken(code);
-    callbackClient.setCredentials(tokens);
-
-    const oauth2 = google.oauth2({ version: 'v2', auth: callbackClient });
-    const { data: userInfo } = await oauth2.userinfo.get();
-
-    // P0.2: state token is single-use, random 32-byte, server-issued, 10-min TTL.
-    // For an "add account" flow, the payload contains { userId, purpose:'link' }.
-    // For a scope upgrade, payload contains { userId, accountId, group,
-    //                                          redirectAfter, purpose:'scope_upgrade' }.
-    // For a fresh login, state may be absent or be a login-purpose token (not required).
-    // popup=true means the frontend opened a popup window — we should respond
-    // with a self-closing HTML page that pings the opener instead of redirecting.
+    // P0.2: state is decoded BEFORE the code exchange because the chosen
+    // OAuth client must match the one that issued the URL. The code
+    // exchange will fail with invalid_grant if you mix Project A and
+    // Project B clients.
+    //   purpose: 'link'           — adding account to existing user
+    //   purpose: 'scope_upgrade'  — incremental scope grant (Project B)
+    //   purpose: 'signin'         — top-level sign-in (Project A)
+    //   missing/expired           — legacy clients pre-PR; treat as
+    //                               main-project sign-in (the old path
+    //                               that still works for in-flight OAuth
+    //                               windows opened before this deploy)
     let linkToUserId = null;
     let isPopup = false;
     let upgradePayload = null;
+    let isSigninFlow = false;
     if (state) {
       const payload = consumeOAuthState(state);
       if (payload && payload.purpose === 'link' && payload.userId) {
@@ -59,10 +60,23 @@ router.get('/google/callback', async (req, res) => {
         isPopup = !!payload.popup;
       } else if (payload && payload.purpose === 'scope_upgrade' && payload.userId && payload.accountId && payload.group) {
         upgradePayload = payload;
+      } else if (payload && payload.purpose === 'signin') {
+        isSigninFlow = true;
       } else if (payload === null) {
         console.warn('[AUTH] OAuth state token invalid or expired — treating as fresh login');
       }
     }
+
+    // P1.9 — fresh OAuth client per callback. The exported singleton is
+    // mutated by setCredentials, which under concurrent callbacks can leak
+    // user A's tokens into user B's userinfo.get() call.
+    // Pick the client matching the project that issued the auth URL.
+    const callbackClient = isSigninFlow ? newSigninOAuth2Client() : newOAuth2Client();
+    const { tokens } = await callbackClient.getToken(code);
+    callbackClient.setCredentials(tokens);
+
+    const oauth2 = google.oauth2({ version: 'v2', auth: callbackClient });
+    const { data: userInfo } = await oauth2.userinfo.get();
 
     // P1.12 — scope upgrade short-circuit. We do NOT touch users/sessions:
     // this is an existing logged-in user adding scopes to an existing
@@ -240,49 +254,60 @@ router.get('/google/callback', async (req, res) => {
       }
     }
 
-    // Determine which services the user granted
-    const grantedScopes = tokens.scope ? tokens.scope.split(' ') : [];
-    const grantedServices = [];
-    if (grantedScopes.some(s => s.includes('gmail'))) grantedServices.push('mail');
-    if (grantedScopes.some(s => s.includes('drive'))) grantedServices.push('docs');
-    if (grantedScopes.some(s => s.includes('calendar'))) grantedServices.push('cals');
+    // Two-project split — sign-in flow (Project A) skips gmail_accounts
+    // entirely. Project A tokens grant only profile + email and are
+    // useless beyond identity verification; storing them would clutter
+    // the row and confuse downstream code that assumes encrypted_tokens
+    // can authorize Gmail/Drive/Calendar API calls. New users land in
+    // the app with zero connected accounts and click "Add Account" to
+    // run the Project B OAuth (which DOES persist tokens). Existing
+    // users keep their previously-stored Project B tokens — those rows
+    // aren't touched here.
+    if (!isSigninFlow) {
+      // Determine which services the user granted
+      const grantedScopes = tokens.scope ? tokens.scope.split(' ') : [];
+      const grantedServices = [];
+      if (grantedScopes.some(s => s.includes('gmail'))) grantedServices.push('mail');
+      if (grantedScopes.some(s => s.includes('drive'))) grantedServices.push('docs');
+      if (grantedScopes.some(s => s.includes('calendar'))) grantedServices.push('cals');
 
-    const { data: existingAccount, error: accFindErr } = await supabase
-      .from('gmail_accounts')
-      .select('*')
-      .eq('user_id', userId)
-      .eq('gmail_email', userInfo.email)
-      .single();
-
-    if (accFindErr && accFindErr.code !== 'PGRST116') {
-      console.error('[AUTH] Error finding gmail_account:', accFindErr);
-    }
-
-    if (!existingAccount) {
-      const { error: insertErr } = await supabase.from('gmail_accounts').insert({
-        user_id: userId,
-        gmail_email: userInfo.email,
-        account_name: userInfo.name || userInfo.email,
-        picture: userInfo.picture || null,
-        encrypted_tokens: encryptToken(tokens),
-        granted_scopes: grantedServices
-      });
-      if (insertErr) {
-        console.error('[AUTH] Error inserting gmail_account:', insertErr);
-        throw insertErr;
-      }
-    } else {
-      const { error: updateErr } = await supabase
+      const { data: existingAccount, error: accFindErr } = await supabase
         .from('gmail_accounts')
-        .update({
+        .select('*')
+        .eq('user_id', userId)
+        .eq('gmail_email', userInfo.email)
+        .single();
+
+      if (accFindErr && accFindErr.code !== 'PGRST116') {
+        console.error('[AUTH] Error finding gmail_account:', accFindErr);
+      }
+
+      if (!existingAccount) {
+        const { error: insertErr } = await supabase.from('gmail_accounts').insert({
+          user_id: userId,
+          gmail_email: userInfo.email,
+          account_name: userInfo.name || userInfo.email,
+          picture: userInfo.picture || null,
           encrypted_tokens: encryptToken(tokens),
-          granted_scopes: grantedServices,
-          picture: userInfo.picture || null
-        })
-        .eq('id', existingAccount.id);
-      if (updateErr) {
-        console.error('[AUTH] Error updating gmail_account:', updateErr);
-        throw updateErr;
+          granted_scopes: grantedServices
+        });
+        if (insertErr) {
+          console.error('[AUTH] Error inserting gmail_account:', insertErr);
+          throw insertErr;
+        }
+      } else {
+        const { error: updateErr } = await supabase
+          .from('gmail_accounts')
+          .update({
+            encrypted_tokens: encryptToken(tokens),
+            granted_scopes: grantedServices,
+            picture: userInfo.picture || null
+          })
+          .eq('id', existingAccount.id);
+        if (updateErr) {
+          console.error('[AUTH] Error updating gmail_account:', updateErr);
+          throw updateErr;
+        }
       }
     }
 

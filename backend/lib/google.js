@@ -51,6 +51,33 @@ const oauth2Client = new google.auth.OAuth2(
   GOOGLE_REDIRECT_URI
 );
 
+// P1.12 / two-project split: a SECOND Cloud project (all-the-mail-signin)
+// holds an OAuth client that requests only profile + email at runtime and
+// declares no sensitive/restricted scopes on its consent screen. Because
+// no sensitive scopes are involved, that project doesn't trigger Google's
+// "Google hasn't verified this app" warning at sign-in. Account linking
+// and per-feature scope upgrades continue to flow through the existing
+// (full-scope) project — those still show the warning until verification
+// clears, but they fire in the right context (user explicitly clicking
+// "Connect Gmail").
+//
+// Same redirect URI is intentional — the callback handler branches on
+// state.flow to decide which client to use for the token exchange.
+const GOOGLE_SIGNIN_CLIENT_ID = process.env.GOOGLE_SIGNIN_CLIENT_ID;
+const GOOGLE_SIGNIN_CLIENT_SECRET = process.env.GOOGLE_SIGNIN_CLIENT_SECRET;
+
+const signinOAuth2Client = new google.auth.OAuth2(
+  GOOGLE_SIGNIN_CLIENT_ID || GOOGLE_CLIENT_ID,
+  GOOGLE_SIGNIN_CLIENT_SECRET || GOOGLE_CLIENT_SECRET,
+  GOOGLE_REDIRECT_URI
+);
+
+if (!GOOGLE_SIGNIN_CLIENT_ID || !GOOGLE_SIGNIN_CLIENT_SECRET) {
+  // Falls back to the main client. Sign-in still works but the warning
+  // returns. Configure the env vars on Render for the warning-free path.
+  console.warn('[google] GOOGLE_SIGNIN_CLIENT_ID/SECRET not set — sign-in will fall back to the main OAuth client and show the unverified-app warning.');
+}
+
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
 
 // P2 — fail closed in production. A missing ENCRYPTION_KEY in prod means
@@ -192,6 +219,18 @@ function newOAuth2Client() {
   );
 }
 
+// Same isolation pattern but for the sign-in client. The callback decides
+// which factory to call based on state.purpose === 'signin'. Falls back to
+// the main client's credentials if the sign-in env vars aren't configured
+// so a misconfigured deploy still authenticates (just shows the warning).
+function newSigninOAuth2Client() {
+  return new google.auth.OAuth2(
+    GOOGLE_SIGNIN_CLIENT_ID || GOOGLE_CLIENT_ID,
+    GOOGLE_SIGNIN_CLIENT_SECRET || GOOGLE_CLIENT_SECRET,
+    GOOGLE_REDIRECT_URI
+  );
+}
+
 // P1.12 — incremental scope upgrade. Builds an OAuth URL that requests
 // just the scopes for one feature group (mail/docs/cals). The state token
 // is the existing single-use random token from security.js (NOT a JWT) so
@@ -248,7 +287,9 @@ export {
   ALL_SCOPES,
   MINIMUM_SCOPES,
   oauth2Client,
+  signinOAuth2Client,
   newOAuth2Client,
+  newSigninOAuth2Client,
   encryptToken,
   decryptToken,
   getOAuth2ClientForAccount,
