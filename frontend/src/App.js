@@ -2285,8 +2285,26 @@ const AllTheMail = () => {
                       The branch existed as live attack surface; if anyone added a
                       backend html response, untrusted content would land in the app
                       origin via dangerouslySetInnerHTML. Removed entirely. */}
-                  {!docPreviewLoading && docPreview?.type === 'thumbnail' && (<div className="doc-preview-content"><img src={docPreview.url} alt={docPreview.name || slideOverDoc.title} style={{ maxWidth: '100%', borderRadius: '6px' }} /></div>)}
-                  {!docPreviewLoading && docPreview?.type === 'none' && (<p style={{ color: 'var(--text-3)', fontSize: '13px', margin: '0 0 20px' }}>Preview not available for this file type</p>)}
+                  {!docPreviewLoading && docPreview?.type === 'thumbnail' && (
+                    <div className="doc-preview-thumbnail">
+                      <img
+                        src={docPreview.url}
+                        alt={docPreview.name || slideOverDoc.title}
+                        style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain', borderRadius: '6px' }}
+                      />
+                      <p style={{ color: 'var(--text-3)', fontSize: '12px', margin: '12px 0 0', textAlign: 'center' }}>
+                        Inline preview not available for this file type. Showing thumbnail.
+                      </p>
+                    </div>
+                  )}
+                  {!docPreviewLoading && docPreview?.type === 'none' && (
+                    <div className="doc-preview-empty">
+                      <p style={{ margin: 0, fontSize: '14px' }}>Preview unavailable</p>
+                      <p style={{ color: 'var(--text-3)', fontSize: '13px', margin: '6px 0 0' }}>
+                        {slideOverDoc.title} can&apos;t be previewed inline. Open it in {editorLabel} instead.
+                      </p>
+                    </div>
+                  )}
                   {/* Defensive fallback: if the backend returned a shape we
                       don't recognize (network error, future schema change,
                       or docPreview is null after fetch), show a brief

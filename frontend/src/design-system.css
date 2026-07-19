@@ -318,6 +318,11 @@
 [data-theme="light"] .doc-preview-content h3 {
   color: rgba(0, 0, 0, 0.92) !important;
 }
+[data-theme="light"] .doc-preview-thumbnail,
+[data-theme="light"] .doc-preview-empty {
+  background: rgba(0, 0, 0, 0.02);
+  border-color: rgba(0, 0, 0, 0.06);
+}
 
 /* Panel resize handles in light mode */
 [data-theme="light"] .panel-resize-handle::after {
@@ -2943,6 +2948,37 @@ select:focus-visible {
 .doc-preview-content h3 {
   color: rgba(255, 255, 255, 0.95) !important;
   margin-top: 1em;
+}
+
+.doc-preview-thumbnail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  margin-bottom: 20px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  max-height: 60vh;
+}
+
+.doc-preview-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 24px;
+  margin-bottom: 20px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  text-align: center;
+}
+
+.doc-preview-empty p:first-child {
+  color: var(--text-1);
+  font-weight: 500;
 }
 
 @media (prefers-reduced-motion: reduce) {
