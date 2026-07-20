@@ -712,15 +712,22 @@ export function useEmail({
   const navigatePrev = useCallback(() => navigateReader('prev'), [navigateReader]);
   const navigateNext = useCallback(() => navigateReader('next'), [navigateReader]);
 
+  // Opening a message in the reader loads ONLY that message (plus its thread for
+  // conversation view). It deliberately does NOT fan out speculative body loads
+  // for the next 25 rows: with multiple connected accounts that amplified a
+  // single open into a burst of provider requests that exhausted the Google API
+  // quota, whose 429s then degraded the reader and the list. Visible-inbox
+  // prefetch is owned exclusively by the /batch-bodies effect below, which is
+  // account-scoped, chunked, cache-aware, and bounded — the single canonical
+  // prefetch path. See navigateReader / utils/readerNav.js for the same
+  // one-destination-per-action invariant on J/K navigation.
   const onSelectEmail = useCallback((email) => {
     setSelectedEmail(email);
     if (setShowMetadata) setShowMetadata(false);
     if (setReaderCompact) setReaderCompact(false);
     loadEmailDetails(email); loadThread(email); setSelectedThreadActiveMessageId(email.id);
     if (splitMode === 'none' && setFullPageReaderOpen) setFullPageReaderOpen(true);
-    const idx = filteredEmails.findIndex(e => sameMailItem(e, email));
-    if (idx >= 0) filteredEmails.slice(idx + 1, idx + 26).forEach((e, i) => setTimeout(() => loadEmailDetails(e), (i + 1) * 50));
-  }, [loadEmailDetails, loadThread, splitMode, filteredEmails, setShowMetadata, setReaderCompact, setFullPageReaderOpen]);
+  }, [loadEmailDetails, loadThread, splitMode, setShowMetadata, setReaderCompact, setFullPageReaderOpen]);
 
   // Batch-prefetch visible inbox.
   //
