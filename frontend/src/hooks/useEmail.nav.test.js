@@ -259,28 +259,48 @@ test('opening a row loads exactly one detail + one thread, with no next-25 fan-o
   }
 });
 
-// Account-aware seeding: alternating account A / account B rows that deliberately
-// SHARE provider-local message and thread IDs (m0/m1/... in both mailboxes). A
-// bare-id keyed prefetch or detail load would let account A's colliding id
-// satisfy — or be requested for — account B's selection. The composite
-// (account, id) identity must keep them distinct.
-function makeAltAccountEmails(n) {
-  return Array.from({ length: n }, (_, i) => {
-    const accountId = i % 2 === 0 ? 'A' : 'B';
-    return {
-      id: `m${i}`,
-      threadId: `m${i}`,
-      accountId,
-      from: `Sender ${i} <s${i}@x.com>`,
-      subject: `Subject ${i}`,
-      snippet: `snippet ${i}`,
-      date: new Date(2024, 0, 1, 0, n - i).toISOString(),
+// Account-collision seeding: 15 pairs → 30 rows. Each pair TRULY collides —
+// account A and account B each hold the SAME provider-local message id
+// (`shared-${i}`) AND thread id (`thread-${i}`). Provider-local ids are unique
+// only within one mailbox, so this cross-account duplication is legitimate and
+// is exactly what a bare-id keyed detail/prefetch would mishandle: account A's
+// `shared-0` could satisfy — or be fetched for — account B's `shared-0`
+// selection. The composite (account, id) identity must keep them distinct.
+//
+// Dates make the unified (newest-first) list strictly alternate A, B, A, B…:
+// within each pair account A is one tick newer than account B, and each pair is
+// older than the previous one. Ranks (0 = newest) are A_i = 2i, B_i = 2i+1, so
+// the descending order is A0, B0, A1, B1, … — no ambiguity in the sort.
+function makeCollidingAccountPairs(pairs) {
+  const byAccount = { A: { primary: [] }, B: { primary: [] } };
+  for (let i = 0; i < pairs; i++) {
+    const rankA = 2 * i;      // newer within the pair
+    const rankB = 2 * i + 1;  // one tick older than its A partner
+    byAccount.A.primary.push({
+      id: `shared-${i}`,
+      threadId: `thread-${i}`,
+      accountId: 'A',
+      from: `A Sender ${i} <a${i}@x.com>`,
+      subject: `A Subject ${i}`,
+      snippet: `a snippet ${i}`,
+      date: new Date(2024, 0, 1, 0, 0, 40 - rankA).toISOString(),
       isRead: true,
-    };
-  });
+    });
+    byAccount.B.primary.push({
+      id: `shared-${i}`,       // identical provider-local id to account A's row
+      threadId: `thread-${i}`, // identical provider-local thread id too
+      accountId: 'B',
+      from: `B Sender ${i} <b${i}@x.com>`,
+      subject: `B Subject ${i}`,
+      snippet: `b snippet ${i}`,
+      date: new Date(2024, 0, 1, 0, 0, 40 - rankB).toISOString(),
+      isRead: true,
+    });
+  }
+  return byAccount;
 }
 
-function renderAltAccounts(n = 30) {
+function renderCollidingAccounts(pairs = 15) {
   const connectedAccounts = [
     { id: 'A', gmail_email: 'a@x.com' },
     { id: 'B', gmail_email: 'b@x.com' },
@@ -289,10 +309,7 @@ function renderAltAccounts(n = 30) {
   const { result } = renderHook(() =>
     useEmail({ ...baseProps, activeView: 'everything', connectedAccounts })
   );
-  const alt = makeAltAccountEmails(n);
-  const byAccount = { A: { primary: [] }, B: { primary: [] } };
-  alt.forEach((e) => byAccount[e.accountId].primary.push(e));
-  act(() => { result.current.setEmails(byAccount); });
+  act(() => { result.current.setEmails(makeCollidingAccountPairs(pairs)); });
   return result;
 }
 
@@ -300,12 +317,21 @@ test('opening an account-B row requests only account B detail/thread — no spec
   jest.useFakeTimers();
   try {
     global.fetch = router();
-    const result = renderAltAccounts(30);
+    const result = renderCollidingAccounts(15);
 
-    // Pick a row owned by account B whose provider-local id (mN) also exists in
-    // account A's mailbox — the collision that a bare-id path would mishandle.
-    const targetB = result.current.filteredEmails.find((e) => e.accountId === 'B');
+    const list = result.current.filteredEmails;
+    // 1. The unified list contains all 30 rows — both accounts' colliding ids
+    //    survive (cross-account rows are never merged by a bare id).
+    expect(list).toHaveLength(30);
+    // 2. Newest-first order strictly alternates A, B, A, B, A, B, …
+    expect(list.slice(0, 6).map((e) => e.accountId)).toEqual(['A', 'B', 'A', 'B', 'A', 'B']);
+
+    // 3. Select the account-B row whose id `shared-0` / threadId `thread-0` ALSO
+    //    exists in account A — the exact collision under test.
+    const targetB = list.find((e) => e.accountId === 'B' && e.id === 'shared-0' && e.threadId === 'thread-0');
     expect(targetB).toBeTruthy();
+    // Guard the fixture: account A really does hold the same provider-local ids.
+    expect(list.some((e) => e.accountId === 'A' && e.id === 'shared-0' && e.threadId === 'thread-0')).toBe(true);
 
     global.fetch.mockClear();
     await act(async () => {
@@ -313,21 +339,19 @@ test('opening an account-B row requests only account B detail/thread — no spec
       await Promise.resolve();
       await Promise.resolve();
     });
+    // 4. Advance past the old staggered fan-out window (well beyond two seconds).
     await act(async () => { jest.advanceTimersByTime(2000); await Promise.resolve(); });
 
     const detailGets = detailGetUrls(global.fetch);
     const threadGets = threadGetUrls(global.fetch);
 
-    // The selected account-B detail + thread URLs are requested (account-scoped).
-    expect(detailGets).toContain(`${API}/emails/B/${targetB.id}`);
-    expect(threadGets).toContain(`${API}/emails/B/${targetB.threadId}/thread`);
-
-    // Exactly one detail GET total — the selected message — and it is NOT the
-    // colliding account-A message with the same provider-local id.
-    expect(detailGets).toEqual([`${API}/emails/B/${targetB.id}`]);
-    expect(detailGets).not.toContain(`${API}/emails/A/${targetB.id}`);
-    const accountAGets = detailGets.filter((u) => u.startsWith(`${API}/emails/A/`));
-    expect(accountAGets).toHaveLength(0);
+    // Detail requests equal EXACTLY the selected account-B message.
+    expect(detailGets).toEqual([`${API}/emails/B/shared-0`]);
+    // Thread requests equal EXACTLY the selected account-B thread.
+    expect(threadGets).toEqual([`${API}/emails/B/thread-0/thread`]);
+    // No account-A detail request occurs — not for the colliding id, not for any.
+    expect(detailGets).not.toContain(`${API}/emails/A/shared-0`);
+    expect(detailGets.filter((u) => u.startsWith(`${API}/emails/A/`))).toHaveLength(0);
   } finally {
     jest.useRealTimers();
   }
